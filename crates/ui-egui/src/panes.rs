@@ -142,12 +142,12 @@ fn format_shape(app: &mut SlideApp, ui: &mut Ui) {
             ui.add_space(6.0);
             ui.label(egui::RichText::new("Glow").font(theme::bold(13.0)));
             let mut g = sh.effects.as_ref().and_then(|e| e.glow.as_ref().map(|g| g.radius)).unwrap_or(0.0);
-            if ui.add(egui::Slider::new(&mut g, 0.0..=40.0).text("size (pt)")).drag_stopped() {
+            if crate::widgets::value_slider(ui, &mut g, 0.0..=40.0, "Glow size", 1, " pt", 0.0) {
                 run(app, "shape.effects", json!({"glow": if g > 0.0 { json!(g) } else { Value::Null }}));
             }
             ui.label(egui::RichText::new("Soft Edges").font(theme::bold(13.0)));
             let mut s = sh.effects.as_ref().and_then(|e| e.soft_edge).unwrap_or(0.0);
-            if ui.add(egui::Slider::new(&mut s, 0.0..=50.0).text("size (pt)")).drag_stopped() {
+            if crate::widgets::value_slider(ui, &mut s, 0.0..=50.0, "Soft edge size", 1, " pt", 0.0) {
                 run(app, "shape.effects", json!({"softEdges": s}));
             }
             if ui.button("Reset Effects").clicked() {
@@ -229,22 +229,26 @@ fn format_shape(app: &mut SlideApp, ui: &mut Ui) {
         }
         "picture" => {
             let adj = if let ShapeKind::Picture { fill } = &sh.kind { fill.adjust.clone() } else { Default::default() };
-            let mut b = adj.brightness as f32;
-            if ui.add(egui::Slider::new(&mut b, -1.0..=1.0).text("Brightness")).drag_stopped() {
+            let mut b = adj.brightness;
+            ui.label("Brightness");
+            if crate::widgets::value_slider(ui, &mut b, -1.0..=1.0, "Brightness", 2, "", 0.0) {
                 run(app, "picture.adjust", json!({"brightness": b}));
             }
-            let mut c = adj.contrast as f32;
-            if ui.add(egui::Slider::new(&mut c, -1.0..=1.0).text("Contrast")).drag_stopped() {
+            let mut c = adj.contrast;
+            ui.label("Contrast");
+            if crate::widgets::value_slider(ui, &mut c, -1.0..=1.0, "Contrast", 2, "", 0.0) {
                 run(app, "picture.adjust", json!({"contrast": c}));
             }
-            let mut s = adj.saturation.unwrap_or(1.0) as f32;
-            if ui.add(egui::Slider::new(&mut s, 0.0..=4.0).text("Saturation")).drag_stopped() {
+            let mut s = adj.saturation.unwrap_or(1.0);
+            ui.label("Saturation");
+            if crate::widgets::value_slider(ui, &mut s, 0.0..=4.0, "Saturation", 2, "×", 1.0) {
                 run(app, "picture.adjust", json!({"saturation": s}));
             }
             let alpha = if let ShapeKind::Picture { fill } = &sh.kind { fill.alpha.unwrap_or(1.0) } else { 1.0 };
-            let mut tr = (1.0 - alpha) as f32;
-            if ui.add(egui::Slider::new(&mut tr, 0.0..=1.0).text("Transparency")).drag_stopped() {
-                run(app, "picture.adjust", json!({"transparency": tr}));
+            let mut tr = (1.0 - alpha) * 100.0;
+            ui.label("Transparency");
+            if crate::widgets::value_slider(ui, &mut tr, 0.0..=100.0, "Transparency", 0, "%", 0.0) {
+                run(app, "picture.adjust", json!({"transparency": tr / 100.0}));
             }
             if ui.button("Reset Picture").clicked() {
                 run(app, "picture.reset", json!({}));
@@ -286,11 +290,11 @@ fn format_shape(app: &mut SlideApp, ui: &mut Ui) {
             ui.horizontal(|ui| {
                 ui.label("Transparency");
                 let id = ui.id().with("ftr");
-                let mut v: f32 = ui.data_mut(|d| d.get_temp(id).unwrap_or(0.0));
-                let r = ui.add(egui::Slider::new(&mut v, 0.0..=100.0).suffix("%"));
+                let mut v: f64 = ui.data_mut(|d| d.get_temp(id).unwrap_or(0.0));
+                let apply = crate::widgets::value_slider(ui, &mut v, 0.0..=100.0, "Transparency", 0, "%", 0.0);
                 ui.data_mut(|d| d.insert_temp(id, v));
-                if r.drag_stopped() || r.lost_focus() {
-                    let _ = app.run("shape.fill", json!({"transparency": v as f64 / 100.0}));
+                if apply {
+                    let _ = app.run("shape.fill", json!({"transparency": v / 100.0}));
                 }
             });
             if let Some(Fill::Gradient(g)) = &sh.fill {

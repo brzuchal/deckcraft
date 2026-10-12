@@ -720,10 +720,20 @@ fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             if ui.checkbox(&mut dark, "Dark appearance").changed() {
                 let _ = app.run("view.dark", json!({"on": dark}));
             }
-            let mut scale = app.ui.ui_scale;
-            if ui.add(egui::Slider::new(&mut scale, 0.75..=1.75).text("Interface size")).changed() {
-                app.ui.ui_scale = scale;
-            }
+            let mut scale = f64::from(app.ui.ui_scale);
+            ui.horizontal(|ui| {
+                ui.label("Interface size");
+                let style = crate::widgets::slider_style(&theme::Tokens::get(ui.ctx()));
+                if craft_ui::slider::Slider::new(&mut scale, 0.75..=1.75, "Interface size", &style)
+                    .step(0.05)
+                    .mark(1.0)
+                    .editable(2, "×")
+                    .show(ui)
+                    .changed()
+                {
+                    app.ui.ui_scale = scale as f32;
+                }
+            });
             ui.label(egui::RichText::new("Editing").font(theme::bold(13.0)));
             ui.checkbox(&mut app.session.prefs.smart_guides, "Show smart guides");
             ui.checkbox(&mut app.session.prefs.snap_to_grid, "Snap objects to grid");
