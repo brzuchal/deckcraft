@@ -3,23 +3,23 @@
 > **Generated:** 2026-10-10 (summary by `cargo xtask parity`; rows re-scored 2026-10-10 against PowerPoint for Mac 16.113.4) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 The summary between `<!-- SUMMARY -->
-**Weighted breadth parity: 79%** over 191 features.
+**Weighted breadth parity: 80%** over 191 features.
 
 | Priority | Features | Done | Partial | Missing | Parity |
 |---|---|---|---|---|---|
-| P0 | 72 | 60 | 12 | 0 | 92% |
-| P1 | 65 | 38 | 21 | 6 | 75% |
-| P2 | 54 | 13 | 13 | 28 | 36% |
+| P0 | 72 | 61 | 11 | 0 | 92% |
+| P1 | 65 | 39 | 20 | 6 | 75% |
+| P2 | 54 | 13 | 15 | 26 | 38% |
 
 | Area | Parity |
 |---|---|
-| Application shell | 71% |
+| Application shell | 77% |
 | Files | 71% |
 | Slides | 90% |
 | Views | 90% |
 | Masters & themes | 85% |
-| Shapes | 86% |
-| Format | 81% |
+| Shapes | 88% |
+| Format | 83% |
 | Arrange | 100% |
 | Text | 80% |
 | Tables | 89% |
@@ -32,17 +32,17 @@ The summary between `<!-- SUMMARY -->
 | Slide show | 66% |
 | Review | 60% |
 | Draw | 33% |
-| Undo & clipboard | 88% |
+| Undo & clipboard | 100% |
 | Automation (✱) | 100% |
 | Platforms (✱) | 67% |
 
-Open P0 items: Start screen (new, templates/themes, recent), Contextual tabs (Shape Format, Picture Format, Table Design/Layout, Chart Design), Export to PDF (slides, notes pages, handouts; text layer, links, bookmarks; vector artwork pending), Format Shape pane, Font, size, bold, italic, underline, strikethrough (only Regular/Bold/Italic faces, #69), Edit chart data, Crop (and crop to shape, aspect ratio), Paste image from clipboard (fails on Windows and Linux, #53), Audio/video playback in the show (WMA/WMV not decodable yet), Animation pane (reorder, timing), Presenter view (notes, next slide, timer), macOS, Windows, Linux builds.
+Open P0 items: Contextual tabs (Shape Format, Picture Format, Table Design/Layout, Chart Design), Export to PDF (slides, notes pages, handouts; text layer, links, bookmarks; vector artwork pending), Format Shape pane, Font, size, bold, italic, underline, strikethrough (only Regular/Bold/Italic faces, #69), Edit chart data, Crop (and crop to shape, aspect ratio), Paste image from clipboard (fails on Windows and Linux, #53), Audio/video playback in the show (WMA/WMV not decodable yet), Animation pane (reorder, timing), Presenter view (notes, next slide, timer), macOS, Windows, Linux builds.
 
 ## Rows
 
 | Area | Feature | Priority | Status |
 |---|---|---|---|
-| Application shell | Start screen (new, templates/themes, recent) | P0 | P |
+| Application shell | Start screen (new, templates/themes, recent) | P0 | D |
 | Application shell | Ribbon with Home/Insert/Draw/Design/Transitions/Animations/Slide Show/Review/View tabs | P0 | D |
 | Application shell | Contextual tabs (Shape Format, Picture Format, Table Design/Layout, Chart Design) | P0 | P |
 | Application shell | Quick Access toolbar / title bar commands | P1 | P |
@@ -110,12 +110,12 @@ Open P0 items: Start screen (new, templates/themes, recent), Contextual tabs (Sh
 | Shapes | Connectors (straight, elbow, curved) | P0 | D |
 | Shapes | Connector glue to connection sites | P1 | D |
 | Shapes | Freeform, curve and scribble tools | P1 | D |
-| Shapes | Edit points | P1 | M |
+| Shapes | Edit points | P1 | P |
 | Shapes | Merge shapes (union, combine, fragment, intersect, subtract) | P1 | D |
 | Shapes | Change shape | P1 | D |
 | Shapes | Text boxes | P0 | D |
 | Shapes | WordArt | P1 | P |
-| Shapes | Text warp transforms | P2 | M |
+| Shapes | Text warp transforms | P2 | P |
 | Shapes | Shape quick styles | P1 | D |
 | Shapes | Set as default shape | P2 | D |
 | Format | Solid fill and transparency | P0 | D |
@@ -126,7 +126,7 @@ Open P0 items: Start screen (new, templates/themes, recent), Contextual tabs (Sh
 | Format | Arrowheads | P0 | D |
 | Format | Shadow (outer, inner, presets) | P1 | D |
 | Format | Reflection, glow, soft edges | P2 | P |
-| Format | Bevel and 3-D rotation | P2 | M |
+| Format | Bevel and 3-D rotation | P2 | P |
 | Format | Format Painter | P1 | D |
 | Format | Format Shape pane | P0 | P |
 | Arrange | Size and position (exact), lock aspect ratio | P0 | D |
@@ -199,7 +199,7 @@ Open P0 items: Start screen (new, templates/themes, recent), Contextual tabs (Sh
 | Transitions | Transition gallery (fade, push, wipe, split, cover, uncover, zoom, morph…) | P0 | D |
 | Transitions | Effect options and duration | P0 | D |
 | Transitions | Advance on click / after time, apply to all | P0 | D |
-| Transitions | Transition sounds | P2 | M |
+| Transitions | Transition sounds | P2 | D |
 | Transitions | Morph | P1 | D |
 | Animations | Entrance, emphasis, exit effects | P0 | D |
 | Animations | Motion paths | P1 | P |
@@ -227,7 +227,7 @@ Open P0 items: Start screen (new, templates/themes, recent), Contextual tabs (Sh
 | Draw | Ink to shape / text | P2 | M |
 | Undo & clipboard | Unlimited undo/redo | P0 | D |
 | Undo & clipboard | Cut, copy, paste shapes and slides | P0 | D |
-| Undo & clipboard | Paste special (keep formatting, picture, text only) | P1 | P |
+| Undo & clipboard | Paste special (keep formatting, picture, text only) | P1 | D |
 | Automation (✱) | Every command scriptable (CLI, control channel, MCP) | P0 | D |
 | Automation (✱) | Headless rendering and conversion | P0 | D |
 | Platforms (✱) | macOS, Windows, Linux builds | P0 | P |

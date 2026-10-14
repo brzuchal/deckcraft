@@ -1,4 +1,4 @@
-//! Shape trees: autoshapes, pictures, groups, connectors, tables, charts, media, ink and kept objects.
+//! Shape trees: autoshapes, pictures, groups, connectors, tables, charts, media, ink, 3-D models and kept objects.
 
 use std::collections::{HashMap, HashSet};
 
@@ -100,7 +100,10 @@ pub fn geometry(w: &mut W, g: &Geom) {
                     vals.push(defaults.get(vals.len()).copied().unwrap_or(0.0));
                 }
                 w.open0("a:avLst");
-                let single = if defaults.is_empty() { vals.len() == 1 } else { defaults.len() == 1 };
+                // A lone guide is `adj`, except in these presets, which name it `adj1` (as PowerPoint
+                // writes them); PowerPoint won't open a file that renames it (#214).
+                let adj1 = matches!(name, "bentConnector3" | "curvedConnector3" | "frame" | "mathPlus" | "mathMinus" | "mathMultiply");
+                let single = !adj1 && if defaults.is_empty() { vals.len() == 1 } else { defaults.len() == 1 };
                 for (i, v) in vals.iter().enumerate() {
                     let n = if single && i == 0 { "adj".to_string() } else { format!("adj{}", i + 1) };
                     let v = if v.is_finite() { v.round().clamp(-2.0e9, 2.0e9) as i64 } else { 0 };
@@ -177,8 +180,24 @@ fn nv_pr(w: &mut W, s: &Shape) {
     }
 }
 
+/// Locking attributes. Lock writes the full set PowerPoint writes for the element's kind (and
+/// reads back as locked): see `read::shapes::is_locked`.
 fn locks(w: &mut W, tag: &str, s: &Shape, extra: A) {
-    let a = extra.t("noGrp", s.ph.is_some()).t("noMove", s.locked).t("noResize", s.locked);
+    let a = extra.t("noGrp", s.ph.is_some() || s.locked);
+    let a = match tag {
+        "a:grpSpLocks" => a.t("noUngrp", s.locked).t("noRot", s.locked).t("noMove", s.locked).t("noResize", s.locked),
+        _ => {
+            let a = a
+                .t("noRot", s.locked)
+                .t("noMove", s.locked)
+                .t("noResize", s.locked)
+                .t("noEditPoints", s.locked)
+                .t("noAdjustHandles", s.locked)
+                .t("noChangeArrowheads", s.locked)
+                .t("noChangeShapeType", s.locked);
+            if tag == "a:picLocks" { a.t("noCrop", s.locked) } else { a }
+        }
+    };
     if a.v.is_empty() {
         return;
     }
@@ -226,6 +245,8 @@ fn sp_pr(w: &mut W, x: &mut Exp, o: &mut Out, s: &Shape, geom: bool) {
         dml::effects(w, fx);
         if let Some(raw) = &fx.raw3d {
             w.raw(raw);
+        } else if let Some(xml) = fx.bevel.as_deref().and_then(dml::bevel_sp3d) {
+            w.raw(&xml);
         }
     }
     w.close("p:spPr");
@@ -360,6 +381,7 @@ pub fn shape(w: &mut W, x: &mut Exp, o: &mut Out, cx: &mut Ctx, s: &Shape, depth
             let id = cx.id_for(s);
             media(w, x, o, id, s, m);
         }
+        ShapeKind::Model3d { media, poster } => write_model(w, x, o, cx, s, *media, *poster),
         ShapeKind::Ink { strokes } => {
             // Ink becomes a group of freeform lines.
             let id = cx.id_for(s);
@@ -382,6 +404,64 @@ pub fn shape(w: &mut W, x: &mut Exp, o: &mut Out, cx: &mut Ctx, s: &Shape, depth
         }
         ShapeKind::Opaque { xml, preview, label } => opaque(w, x, o, cx, s, xml, *preview, label),
     }
+}
+
+fn model_rel(x: &mut Exp, o: &mut Out, media: deckcraft_model::MediaId) -> Option<String> {
+    if x.p.media(media).is_none_or(|m| m.data.is_empty()) {
+        return None;
+    }
+    x.media_rel(o, media, crate::opc::RT_MODEL3D)
+}
+
+fn write_model_part(w: &mut W, x: &mut Exp, o: &mut Out, id: u32, s: &Shape, rid: &str) {
+    w.open("p:contentPart", A::new().a("r:id", rid));
+    w.open0("p:nvContentPartPr");
+    cnvpr(w, x, o, id, s);
+    w.empty0("p:cNvContentPartPr");
+    w.empty0("p:nvPr");
+    w.close("p:nvContentPartPr");
+    if let Some(xf) = &s.xfrm {
+        dml::xfrm(w, "p:xfrm", xf, None);
+    }
+    w.close("p:contentPart");
+}
+
+fn write_model(
+    w: &mut W,
+    x: &mut Exp,
+    o: &mut Out,
+    cx: &mut Ctx,
+    s: &Shape,
+    media: deckcraft_model::MediaId,
+    poster: Option<deckcraft_model::MediaId>,
+) {
+    let Some(rid) = model_rel(x, o, media) else {
+        log::warn!("pptx: 3-D model '{}' has no embedded part", s.name);
+        return;
+    };
+    let id = cx.id_for(s);
+    let poster = poster.filter(|p| x.p.media(*p).is_some_and(|m| !m.data.is_empty()));
+    let Some(poster) = poster else {
+        write_model_part(w, x, o, id, s, &rid);
+        return;
+    };
+    // Older readers draw the fallback picture; readers that know `am3d` use the model.
+    w.open("mc:AlternateContent", A::new().a("xmlns:mc", NS_MC));
+    w.open("mc:Choice", A::new().a("xmlns:am3d", "http://schemas.microsoft.com/office/drawing/2017/model3d").a("Requires", "am3d"));
+    write_model_part(w, x, o, id, s, &rid);
+    w.close("mc:Choice");
+    w.open0("mc:Fallback");
+    let pic = Shape {
+        id: ShapeId(0),
+        name: s.name.clone(),
+        xfrm: s.xfrm,
+        kind: ShapeKind::Picture { fill: deckcraft_model::style::PictureFill { media: poster, ..Default::default() } },
+        ..Default::default()
+    };
+    let pid = cx.ids.fresh();
+    shape_with_id(w, x, o, cx, &pic, pid);
+    w.close("mc:Fallback");
+    w.close("mc:AlternateContent");
 }
 
 fn ink_shape(st: &deckcraft_model::InkStroke, i: usize) -> Option<Shape> {
@@ -458,7 +538,7 @@ fn frame_open(w: &mut W, x: &mut Exp, o: &mut Out, id: u32, s: &Shape) {
     w.open0("p:nvGraphicFramePr");
     cnvpr(w, x, o, id, s);
     w.open0("p:cNvGraphicFramePr");
-    w.empty("a:graphicFrameLocks", A::new().a("noGrp", "1").t("noMove", s.locked).t("noResize", s.locked));
+    w.empty("a:graphicFrameLocks", A::new().a("noGrp", "1").t("noDrilldown", s.locked).t("noMove", s.locked).t("noResize", s.locked));
     w.close("p:cNvGraphicFramePr");
     nv_pr(w, s);
     w.close("p:nvGraphicFramePr");
@@ -494,6 +574,9 @@ fn table(w: &mut W, x: &mut Exp, o: &mut Out, t: &Table) {
             .t("bandRow", t.band_row)
             .t("bandCol", t.band_col),
     );
+    if let Some(f) = &t.background {
+        dml::fill(w, x, o, f);
+    }
     w.elt("a:tableStyleId", &guid);
     w.close("a:tblPr");
     w.open0("a:tblGrid");
@@ -563,6 +646,8 @@ fn media(w: &mut W, x: &mut Exp, o: &mut Out, id: u32, s: &Shape, m: &deckcraft_
             action: deckcraft_model::text::Action::PlayMedia,
             tooltip: String::new(),
             highlight_click: false,
+            sound: None,
+            stop_sound: false,
         });
     }
     cnvpr(w, x, o, id, &s2);

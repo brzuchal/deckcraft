@@ -4,7 +4,7 @@
 use deckcraft_model::edit as ed;
 use deckcraft_model::resolve;
 use deckcraft_model::text::{Align, Anchor, AutoFit, Bullet, Caps, ParaProps, RunProps, Spacing, Strike, TextDir};
-use deckcraft_model::{Effects, Fill, Line, Shape};
+use deckcraft_model::{ColorRef, ColorTransform, Effects, Fill, Line, SchemeSlot, Shape};
 use serde_json::{Value, json};
 
 use super::text::{format_body, format_para, format_run};
@@ -13,6 +13,8 @@ use crate::{Result, Session};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!(noundo "font.add", "Add Font", [], None, "{data: base64 TTF/OTF/TTC} → {faces} added for this session", always, font_add),
+        cmd!(noundo "font.rescan", "Rescan Installed Fonts", ["Home", "Font"], None, "{} → {faces, families} (fonts installed since start-up)", always, font_rescan),
         cmd!("format.bold", "Bold", ["Home", "Font"], Some("Cmd+B"), "{on?: bool}", has_text_or_shapes, bold),
         cmd!("format.italic", "Italic", ["Home", "Font"], Some("Cmd+I"), "{on?: bool}", has_text_or_shapes, italic),
         cmd!(
@@ -48,8 +50,25 @@ pub fn specs() -> Vec<CommandSpec> {
             has_text_or_shapes,
             color
         ),
+        cmd!(
+            "format.textTransparency",
+            "Text Transparency",
+            ["Shape Format", "WordArt Styles"],
+            None,
+            "{value: 0..1} — 0 opaque, 1 invisible; keeps the text's colour (inherited colours included)",
+            has_text_or_shapes,
+            text_transparency
+        ),
         cmd!("format.highlight", "Text Highlight Color", ["Home", "Font"], None, "{color? (absent = none)}", has_text_or_shapes, highlight),
-        cmd!("format.case", "Change Case", ["Home", "Font"], Some("Shift+F3"), "{mode: sentence|lower|upper|title|toggle}", has_text_or_shapes, case),
+        cmd!(
+            "format.case",
+            "Change Case",
+            ["Home", "Font"],
+            Some("Shift+F3"),
+            "{mode?: cycle|sentence|lower|upper|title|toggle} — cycle (Shift+F3, the default) goes lowercase → Capitalize Each Word → UPPERCASE; a caret in a word changes that word",
+            has_text_or_shapes,
+            case
+        ),
         cmd!("format.caps", "Caps", [], None, "{caps: none|small|all}", has_text_or_shapes, caps),
         cmd!(
             "format.spacing",
@@ -70,6 +89,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{color?, width?: pt} (no color = none)",
             has_text_or_shapes,
             text_outline
+        ),
+        cmd!(
+            "format.textWarp",
+            "Text Transform",
+            ["Shape Format", "WordArt Styles"],
+            None,
+            "{preset: a prstTxWarp name or none, adj?: [finite raw guide values, at most 8]} — none clears the transform; omitted adj uses the preset's defaults",
+            has_text_or_shapes,
+            text_warp
         ),
         cmd!(
             "format.align",
@@ -107,7 +135,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Numbering",
             ["Home", "Paragraph"],
             None,
-            "{on?: bool, scheme?: arabicPeriod|arabicParenR|romanUcPeriod|romanLcPeriod|alphaUcPeriod|alphaLcParenR|alphaLcPeriod, start?: n}",
+            "{on?: bool, scheme?: arabicPeriod|arabicParenR|romanUcPeriod|romanLcPeriod|alphaUcPeriod|alphaLcParenR|alphaLcPeriod, start?: n, color?, size?: % of text}",
             has_text_or_shapes,
             numbering
         ),
@@ -285,6 +313,41 @@ fn color(s: &mut Session, p: &Value) -> Result<Value> {
     let c = color_param(p, "color").ok_or_else(|| bad("format.color", "missing or invalid `color`"))?;
     format_run(s, &move |r| r.fill = Some(Fill::solid(c.clone())))
 }
+/// `a:alpha` for `transparency` (0–1) on `c`, replacing any alpha it had; fully opaque drops it.
+fn with_transparency(c: &mut ColorRef, transparency: f64) {
+    c.mods.retain(|m| !matches!(m, ColorTransform::Alpha(_)));
+    if transparency > 0.0 {
+        c.mods.push(ColorTransform::Alpha(((1.0 - transparency) * 100_000.0).round() as i32));
+    }
+}
+
+/// Text Fill › Transparency: the text keeps its colour and gets an alpha. A run without its own
+/// fill takes the colour it shows now (from the placeholder, master or theme) so only its
+/// opacity changes.
+fn text_transparency(s: &mut Session, p: &Value) -> Result<Value> {
+    let v = f64_param(p, "value").ok_or_else(|| bad("format.textTransparency", "missing `value` (0–1)"))?;
+    if !v.is_finite() {
+        return Err(bad("format.textTransparency", "`value` must be a number from 0 to 1"));
+    }
+    let v = v.clamp(0.0, 1.0);
+    let shown = match current_run(s).fill {
+        Some(f @ (Fill::Solid { .. } | Fill::Gradient(_))) => f,
+        _ => Fill::solid(ColorRef::scheme(SchemeSlot::Tx1)),
+    };
+    format_run(s, &move |r| {
+        let mut f = match &r.fill {
+            Some(f @ (Fill::Solid { .. } | Fill::Gradient(_))) => f.clone(),
+            Some(Fill::None) => return,
+            _ => shown.clone(),
+        };
+        match &mut f {
+            Fill::Solid { color } => with_transparency(color, v),
+            Fill::Gradient(g) => g.stops.iter_mut().for_each(|st| with_transparency(&mut st.color, v)),
+            _ => {}
+        }
+        r.fill = Some(f);
+    })
+}
 fn highlight(s: &mut Session, p: &Value) -> Result<Value> {
     let c = color_param(p, "color");
     format_run(s, &move |r| r.highlight = c.clone())
@@ -327,16 +390,54 @@ fn text_outline(s: &mut Session, p: &Value) -> Result<Value> {
     format_run(s, &move |r| r.outline = c.clone().map(|c| Line::solid(c, w)))
 }
 
+fn text_warp(s: &mut Session, p: &Value) -> Result<Value> {
+    let preset = str_param(p, "preset").ok_or_else(|| bad("format.textWarp", "missing `preset`"))?;
+    let clear = preset == "none" || preset == "textNoShape";
+    if !clear && !deckcraft_geom::warp::is_supported(preset) {
+        return Err(bad("format.textWarp", format!("unknown text transform `{preset}`")));
+    }
+    let adj = match p.get("adj") {
+        None => Vec::new(),
+        Some(Value::Array(arr)) => {
+            if arr.len() > 8 {
+                return Err(bad("format.textWarp", "at most 8 adjust values"));
+            }
+            let mut v = Vec::with_capacity(arr.len());
+            for a in arr {
+                let Some(n) = a.as_f64().filter(|n| n.is_finite()) else {
+                    return Err(bad("format.textWarp", "adjust values must be finite numbers"));
+                };
+                v.push(n.clamp(-2.0e9, 2.0e9));
+            }
+            v
+        }
+        Some(_) => return Err(bad("format.textWarp", "`adj` must be an array of numbers")),
+    };
+    let stored = if clear { None } else { Some(preset.to_string()) };
+    format_body(s, &|b| {
+        b.warp.clone_from(&stored);
+        b.warp_adj.clone_from(&adj);
+    })
+}
+
 fn case(s: &mut Session, p: &Value) -> Result<Value> {
-    let mode = str_param(p, "mode").unwrap_or("sentence").to_string();
+    let mode = str_param(p, "mode").unwrap_or("cycle").to_string();
     let st = s.doc()?;
     if let Some(t) = st.selection.text.clone() {
-        let (a, b) = t.ordered();
-        if a == b {
-            return ok();
+        let (mut a, mut b) = t.ordered();
+        let body = super::text::body_of(st, &t).cloned().unwrap_or_default();
+        let collapsed = a == b;
+        if collapsed {
+            // Shift+F3 with a bare caret changes the word it is in and puts the caret at its start.
+            let (wa, wb) = ed::word_at(&body, a);
+            let is_word = ed::text_range(&body, wa, wb).chars().any(char::is_alphanumeric);
+            if !(is_word && wa.1 <= a.1 && a.1 < wb.1) {
+                return ok();
+            }
+            (a, b) = (wa, wb);
         }
-        let m = mode.clone();
-        super::text::edit_text(s, move |body, _| {
+        let m = if mode == "cycle" { ed::next_case(&ed::text_range(&body, a, b)).to_string() } else { mode.clone() };
+        super::text::edit_text(s, move |body, t| {
             for pi in a.0..=b.0 {
                 let Some(para) = body.paragraphs.get_mut(pi) else { continue };
                 let n = para.char_len();
@@ -359,9 +460,23 @@ fn case(s: &mut Session, p: &Value) -> Result<Value> {
                     pos += len;
                 }
             }
+            if collapsed {
+                t.anchor = a;
+                t.caret = a;
+            }
         })?;
         return ok();
     }
+    let mode = if mode == "cycle" {
+        let all: String =
+            st.selection.shapes.iter().filter_map(|id| st.shape(*id)).filter_map(|sh| sh.text.as_ref()).map(|t| t.text()).collect::<Vec<_>>().join(
+                "
+",
+            );
+        ed::next_case(&all).to_string()
+    } else {
+        mode
+    };
     edit_shapes(s, &json!({}), "format.case", |sh| {
         if let Some(t) = sh.text.as_mut() {
             for para in &mut t.paragraphs {
@@ -412,7 +527,7 @@ fn bullets(s: &mut Session, p: &Value) -> Result<Value> {
     let on = on_param(p, Some(cur));
     let ch = str_param(p, "char").unwrap_or("•").to_string();
     let col = color_param(p, "color");
-    let size = f64_param(p, "size").map(|v| v / 100.0);
+    let size = f64_param(p, "size").map(|v| (v / 100.0).clamp(0.25, 4.0));
     let explicit_char = p.get("char").is_some();
     format_para(s, &move |para| {
         if on {
@@ -441,9 +556,17 @@ fn numbering(s: &mut Session, p: &Value) -> Result<Value> {
     let on = on_param(p, Some(cur));
     let scheme = str_param(p, "scheme").unwrap_or("arabicPeriod").to_string();
     let start = p.get("start").and_then(Value::as_u64).map(|v| v.clamp(1, 32767) as u32).unwrap_or(1);
+    let col = color_param(p, "color");
+    let size = f64_param(p, "size").map(|v| (v / 100.0).clamp(0.25, 4.0));
     format_para(s, &move |para| {
         if on {
             para.props.bullet = Some(Bullet::AutoNum { scheme: scheme.clone(), start_at: start });
+            if col.is_some() {
+                para.props.bullet_color = col.clone();
+            }
+            if size.is_some() {
+                para.props.bullet_size = size;
+            }
             para.props.margin_left = Some(27.0 + 36.0 * para.level as f64);
             para.props.indent = Some(-27.0);
         } else {
@@ -651,4 +774,27 @@ fn state(s: &mut Session, _p: &Value) -> Result<Value> {
         "lineSpacing": serde_json::to_value(pp.line_spacing).unwrap_or_default(),
         "painter": s.painter.is_some(),
     }))
+}
+
+/// Add a font from its bytes for this session (it then shows in the font menu and draws).
+fn font_add(_s: &mut Session, p: &Value) -> Result<Value> {
+    let data = str_param(p, "data").and_then(base64_decode).ok_or_else(|| bad("font.add", "missing or invalid base64 `data`"))?;
+    if data.len() > 64 << 20 {
+        return Err(bad("font.add", "font file larger than 64 MB"));
+    }
+    let faces = deckcraft_fonts::FontDb::global().add_font(data);
+    if faces == 0 {
+        return Err(bad("font.add", "not a font DeckCraft can read (or already added)"));
+    }
+    Ok(json!({"faces": faces}))
+}
+
+/// Catalog the installed fonts again, so fonts installed while DeckCraft runs appear.
+fn font_rescan(_s: &mut Session, _p: &Value) -> Result<Value> {
+    let db = deckcraft_fonts::FontDb::global();
+    #[cfg(not(target_arch = "wasm32"))]
+    let faces = db.load_system_fonts();
+    #[cfg(target_arch = "wasm32")]
+    let faces = 0usize;
+    Ok(json!({"faces": faces, "families": db.families().len()}))
 }

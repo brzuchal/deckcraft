@@ -1,11 +1,11 @@
-//! Dialogs (Insert Table, Slide Size, Header & Footer, Hyperlink, Set Up Show, Zoom, …), the start
-//! screen and the About window.
+//! Dialogs (Insert Table, Slide Size, Header & Footer, Hyperlink, Set Up Show, Zoom, …) and the
+//! About window. The start screen is File › Home (`backstage.rs`).
 
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::{Value, json};
 
+use crate::SlideApp;
 use crate::theme::{self, Tokens};
-use crate::{SlideApp, ribbon};
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Dialog {
@@ -32,6 +32,7 @@ fn title(id: &str) -> &'static str {
     match id {
         "table" => "Insert Table",
         "slideSize" => "Slide Size",
+        "sizePosition" => "Size and Position",
         "headerFooter" => "Header and Footer",
         "hyperlink" => "Insert Hyperlink",
         "setupShow" => "Set Up Slide Show",
@@ -49,12 +50,14 @@ fn title(id: &str) -> &'static str {
         "symbol" => "Symbol",
         "equation" => "Equation",
         "spelling" => "Spelling",
+        "pasteSpecial" => "Paste Special",
         "accessibility" => "Accessibility Checker",
         "language" => "Language",
         "customShow" => "Custom Shows",
         "chartData" => "Chart Data",
         "trim" => "Trim Media",
         "smartart" => "Choose a SmartArt Graphic",
+        "bullets" => "Bullets and Numbering",
         "quit" => "DeckCraft",
         _ => "DeckCraft",
     }
@@ -148,6 +151,17 @@ fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             });
             field(ui, d, "Width (in):", "w", &format!("{:.2}", cur.width / 72.0));
             field(ui, d, "Height (in):", "h", &format!("{:.2}", cur.height / 72.0));
+            let (w, h) = (num(d, "w", cur.width / 72.0), num(d, "h", cur.height / 72.0));
+            ui.horizontal(|ui| {
+                ui.label("Orientation:");
+                let portrait = ui.radio(h > w, "Portrait").clicked();
+                let landscape = ui.radio(w >= h, "Landscape").clicked();
+                // Picking the other orientation swaps the width and height fields.
+                if portrait && w > h || landscape && h > w {
+                    d.fields.insert("w".into(), format!("{h:.2}"));
+                    d.fields.insert("h".into(), format!("{w:.2}"));
+                }
+            });
             let maximize = check(ui, d, "Maximize content (else ensure fit)", "max", false);
             let (ok, cancel) = buttons(ui, "OK");
             if ok {
@@ -156,6 +170,7 @@ fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             }
             ok || cancel
         }
+        "sizePosition" => size_position_dialog(app, ui, d),
         "headerFooter" => {
             let hf = app.session.active().map(|s| s.doc.header_footer.clone()).unwrap_or_default();
             let date = check(ui, d, "Date and time", "date", hf.date);
@@ -290,6 +305,37 @@ fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             });
             done
         }
+        "close" => {
+            // File › Close and Ctrl+W on a presentation with unsaved changes.
+            let Some(name) = app.session.active().map(|d| d.title()) else { return true };
+            ui.label(egui::RichText::new(format!("Do you want to save the changes you made to “{name}”?")).strong());
+            ui.label("Your changes will be lost if you don't save them.");
+            ui.add_space(8.0);
+            let mut done = false;
+            ui.horizontal(|ui| {
+                let t = Tokens::get(ui.ctx());
+                if ui.add(egui::Button::new("Don't Save").min_size(vec2(84.0, 24.0))).clicked() {
+                    run(app, "file.close", json!({}));
+                    done = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let save = ui.add(egui::Button::new(egui::RichText::new("Save").color(t.accent_text)).fill(t.accent).min_size(vec2(72.0, 24.0)));
+                    if save.clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        app.save();
+                        // In the browser a save is a download: the presentation stays "unsaved".
+                        let web = app.services.pick_save.is_none() && app.services.download.is_some();
+                        if web || app.session.active().is_some_and(|d| !d.is_dirty()) {
+                            run(app, "file.close", json!({}));
+                        }
+                        done = true;
+                    }
+                    if ui.add(egui::Button::new("Cancel").min_size(vec2(72.0, 24.0))).clicked() {
+                        done = true;
+                    }
+                });
+            });
+            done
+        }
         "zoom" => {
             for pct in [400, 200, 150, 100, 75, 66, 50, 33] {
                 if ui.radio(false, format!("{pct}%")).clicked() {
@@ -312,6 +358,107 @@ fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
                 app.ui.pane = Some("comments".into());
             }
             ok || cancel
+        }
+        "bullets" => {
+            // The current paragraph's list, as the dialog's starting point.
+            let cur = app.session.execute("format.state", &json!({})).ok().unwrap_or(Value::Null);
+            let numbered = cur.get("numbering").and_then(Value::as_bool).unwrap_or(false);
+            let tab = d.get("tab", if numbered { "numbered" } else { "bulleted" });
+            ui.horizontal(|ui| {
+                for (k, l) in [("bulleted", "Bulleted"), ("numbered", "Numbered")] {
+                    if ui.selectable_label(tab == k, l).clicked() {
+                        d.fields.insert("tab".into(), k.into());
+                    }
+                }
+            });
+            ui.separator();
+            let style_key = if tab == "numbered" { "scheme" } else { "char" };
+            let current = d.get(style_key, if tab == "numbered" { "arabicPeriod" } else { "•" });
+            let styles: &[(&str, &str)] = if tab == "numbered" {
+                &[
+                    ("arabicPeriod", "1. 2. 3."),
+                    ("arabicParenR", "1) 2) 3)"),
+                    ("romanUcPeriod", "I. II. III."),
+                    ("romanLcPeriod", "i. ii. iii."),
+                    ("alphaUcPeriod", "A. B. C."),
+                    ("alphaLcParenR", "a) b) c)"),
+                    ("alphaLcPeriod", "a. b. c."),
+                ]
+            } else {
+                &[("•", "•"), ("○", "○"), ("■", "■"), ("□", "□"), ("◆", "◆"), ("➢", "➢"), ("✓", "✓"), ("–", "–"), ("★", "★")]
+            };
+            egui::Grid::new("bullet-styles").show(ui, |ui| {
+                for (i, (k, l)) in styles.iter().enumerate() {
+                    let r = ui.add_sized(
+                        vec2(if tab == "numbered" { 88.0 } else { 44.0 }, 40.0),
+                        egui::Button::selectable(current == *k, egui::RichText::new(*l).size(16.0)),
+                    );
+                    if r.clicked() {
+                        d.fields.insert(style_key.into(), (*k).into());
+                    }
+                    if (i + 1) % if tab == "numbered" { 4 } else { 5 } == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+            if tab == "bulleted" {
+                field(ui, d, "Custom character:", "custom", "");
+            } else {
+                field(ui, d, "Start at:", "start", "1");
+            }
+            field(ui, d, "Size (% of text):", "size", "100");
+            let colors = [
+                ("", "Automatic"),
+                ("tx1", "Text"),
+                ("accent1", "Accent 1"),
+                ("accent2", "Accent 2"),
+                ("accent3", "Accent 3"),
+                ("accent4", "Accent 4"),
+                ("accent5", "Accent 5"),
+                ("accent6", "Accent 6"),
+            ];
+            let color = d.get("color", "");
+            ui.horizontal(|ui| {
+                ui.add_sized(vec2(120.0, 20.0), egui::Label::new("Color:"));
+                egui::ComboBox::from_id_salt("bullet-color")
+                    .selected_text(colors.iter().find(|c| c.0 == color).map_or("Automatic", |c| c.1))
+                    .show_ui(ui, |ui| {
+                        for (k, l) in colors {
+                            if ui.selectable_label(color == k, l).clicked() {
+                                d.fields.insert("color".into(), k.into());
+                            }
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                if ui.button("None").on_hover_text("Remove bullets and numbering").clicked() {
+                    d.fields.insert("none".into(), "1".into());
+                }
+            });
+            let (ok, cancel) = buttons(ui, "OK");
+            let none = d.fields.contains_key("none");
+            if none {
+                run(app, if tab == "numbered" { "format.numbering" } else { "format.bullets" }, json!({"on": false}));
+            } else if ok {
+                let mut p = json!({"on": true});
+                if let Some(size) = d.get("size", "100").trim().trim_end_matches('%').parse::<f64>().ok().filter(|v| v.is_finite()) {
+                    p["size"] = json!(size.clamp(25.0, 400.0));
+                }
+                if !color.is_empty() {
+                    p["color"] = json!(color);
+                }
+                if tab == "numbered" {
+                    p["scheme"] = json!(d.get("scheme", "arabicPeriod"));
+                    p["start"] = json!(d.get("start", "1").trim().parse::<u64>().unwrap_or(1).clamp(1, 32767));
+                    run(app, "format.numbering", p);
+                } else {
+                    let custom = d.get("custom", "");
+                    let ch = custom.chars().find(|c| !c.is_whitespace()).map(String::from).unwrap_or_else(|| d.get("char", "•"));
+                    p["char"] = json!(ch);
+                    run(app, "format.bullets", p);
+                }
+            }
+            ok || cancel || none
         }
         "altText" => {
             let cur = app.session.active().and_then(|s| s.selected_shapes().first().map(|x| x.descr.clone())).unwrap_or_default();
@@ -430,45 +577,8 @@ fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             };
             let (ok, cancel) = buttons(ui, "Export");
             if ok {
-                let name = app.session.active().map(|s| s.title()).unwrap_or_else(|| "Presentation".into());
-                let (ext, all) = match fmt.as_str() {
-                    "pdf" => ("pdf", false),
-                    "pngAll" => ("png", true),
-                    "jpeg" => ("jpg", false),
-                    "pptx" => ("pptx", false),
-                    "outline" => ("txt", false),
-                    _ => ("png", false),
-                };
-                let suggested = format!("{name}.{ext}");
-                if let Some(pick) = app.services.pick_save.as_mut() {
-                    if let Some(path) = pick(&suggested) {
-                        let mut params = json!({"path": path, "all": all});
-                        if ext == "pdf"
-                            && let (Some(o), Some(extra)) = (params.as_object_mut(), pdf_params.as_object())
-                        {
-                            o.extend(extra.clone());
-                        }
-                        let r = app.session.execute("file.export", &params);
-                        match r {
-                            Ok(_) => app.set_status(format!("Exported {path}")),
-                            Err(e) => app.set_status(e.to_string()),
-                        }
-                    }
-                } else if let (Some(dl), Some(s)) = (app.services.download.as_mut(), app.session.active()) {
-                    let bytes = match ext {
-                        "png" | "jpg" => {
-                            let img = deckcraft_render::render_slide(
-                                &s.doc,
-                                s.selection.slide,
-                                &deckcraft_render::RenderOpts { scale: 2.0, ..Default::default() },
-                            );
-                            if ext == "png" { img.to_png() } else { img.to_jpeg(92) }
-                        }
-                        "pdf" => deckcraft_pdf_bytes(&s.doc, &pdf_params),
-                        other => deckcraft_engine::cmd::file::save_bytes(&s.doc, other).unwrap_or_default(),
-                    };
-                    dl(&suggested, &bytes);
-                }
+                let extra = if fmt == "pdf" { pdf_params } else { json!({}) };
+                app.export_as(&fmt, extra);
             }
             ok || cancel
         }
@@ -512,6 +622,27 @@ fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
                 run(app, "format.font", json!({"family": "Liberation Serif"}));
                 run(app, "format.italic", json!({"on": true}));
                 run(app, "format.size", json!({"size": 28}));
+            }
+            ok || cancel
+        }
+        "pasteSpecial" => {
+            const OPTS: [(&str, &str); 4] = [
+                ("destinationTheme", "Use Destination Theme"),
+                ("keepSource", "Keep Source Formatting"),
+                ("picture", "Picture (PNG)"),
+                ("text", "Keep Text Only"),
+            ];
+            let has_shapes = !app.session.clipboard.shapes.is_empty();
+            let mut cur = d.get("as", "destinationTheme");
+            ui.label("As:");
+            for (id, label) in OPTS {
+                let ok = has_shapes || matches!(id, "destinationTheme" | "text");
+                ui.add_enabled_ui(ok, |ui| ui.radio_value(&mut cur, id.to_string(), label));
+            }
+            d.fields.insert("as".into(), cur.clone());
+            let (ok, cancel) = buttons(ui, "OK");
+            if ok {
+                run(app, "edit.pasteSpecial", json!({"as": cur}));
             }
             ok || cancel
         }
@@ -754,6 +885,245 @@ fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     }
 }
 
+fn num_text(v: f64) -> String {
+    crate::widgets::fmt_num(v, "")
+}
+
+fn field_of(d: &Dialog, key: &str) -> String {
+    d.fields.get(key).cloned().unwrap_or_default()
+}
+
+fn parse_shown(s: &str) -> Option<f64> {
+    let t = s.trim().trim_end_matches(['%', '"']).trim();
+    if t.is_empty() {
+        return None;
+    }
+    t.parse().ok().filter(|v: &f64| v.is_finite())
+}
+
+fn put_dim(d: &mut Dialog, key: &str, exact: f64, shown: String) {
+    d.fields.insert(key.into(), shown.clone());
+    d.fields.insert(format!("seed{key}"), shown.clone());
+    d.fields.insert(format!("prev{key}"), shown);
+    d.fields.insert(format!("{key}Pt"), exact.to_string());
+}
+
+fn publish_dim(d: &mut Dialog, key: &str, exact: f64, shown: String) {
+    d.fields.insert(key.into(), shown.clone());
+    d.fields.insert(format!("seed{key}"), shown);
+    d.fields.insert(format!("{key}Pt"), exact.to_string());
+}
+
+fn edited(d: &Dialog, key: &str) -> bool {
+    field_of(d, key) != field_of(d, &format!("seed{key}"))
+}
+
+fn exact_of(d: &Dialog, key: &str) -> Option<f64> {
+    parse_shown(&field_of(d, &format!("{key}Pt")))
+}
+
+fn selection_xfrm(app: &SlideApp) -> Option<deckcraft_geom::Xfrm> {
+    let st = app.session.active()?;
+    let id = *st.selection.shapes.first()?;
+    let sh = st.shape(id)?;
+    Some(deckcraft_engine::cmd::xfrm_of(&st.doc, &st.selection, sh))
+}
+
+fn seed_size_position(app: &SlideApp, d: &mut Dialog) {
+    if d.fields.contains_key("baseW") {
+        return;
+    }
+    let num = |k: &str| d.params.get(k).and_then(Value::as_f64).filter(|v| v.is_finite());
+    let sel = selection_xfrm(app);
+    let x = num("x").or_else(|| sel.map(|b| b.x)).unwrap_or(0.0);
+    let y = num("y").or_else(|| sel.map(|b| b.y)).unwrap_or(0.0);
+    let w = num("w").or_else(|| sel.map(|b| b.w)).unwrap_or(72.0);
+    let h = num("h").or_else(|| sel.map(|b| b.h)).unwrap_or(72.0);
+    let rot = num("rot").or_else(|| sel.map(|b| b.rot)).unwrap_or(0.0);
+    let sw = num("scaleW").unwrap_or(100.0);
+    let sh = num("scaleH").unwrap_or(100.0);
+    let lock = d.params.get("lockAspect").and_then(Value::as_bool).unwrap_or(false);
+    put_dim(d, "x", x, num_text(x / 72.0));
+    put_dim(d, "y", y, num_text(y / 72.0));
+    put_dim(d, "w", w, num_text(w / 72.0));
+    put_dim(d, "h", h, num_text(h / 72.0));
+    put_dim(d, "rot", rot, num_text(rot));
+    put_dim(d, "scaleW", sw, num_text(sw));
+    put_dim(d, "scaleH", sh, num_text(sh));
+    d.fields.insert("baseW".into(), w.to_string());
+    d.fields.insert("baseH".into(), h.to_string());
+    let bit = if lock { "1" } else { "0" };
+    d.fields.insert("lock".into(), bit.into());
+    d.fields.insert("prevlock".into(), bit.into());
+}
+
+fn scale_of(pt: f64, base: f64) -> f64 {
+    if base > 0.0 { pt / base * 100.0 } else { 100.0 }
+}
+
+fn current_points(d: &Dialog, key: &str) -> Option<f64> {
+    if edited(d, key) { parse_shown(&field_of(d, key)).map(|inches| inches * 72.0) } else { exact_of(d, key) }
+}
+
+/// Keep scale tied to size, and the other side tied when aspect is locked.
+fn reconcile_size_fields(d: &mut Dialog) {
+    let lock = field_of(d, "lock") == "1";
+    let was_locked = field_of(d, "prevlock") == "1";
+    let base_w = parse_shown(&field_of(d, "baseW")).unwrap_or(1.0);
+    let base_h = parse_shown(&field_of(d, "baseH")).unwrap_or(1.0);
+    let ar = if base_h > 0.0 { base_w / base_h } else { 1.0 };
+    let (w_s, h_s, sw_s, sh_s) = (field_of(d, "w"), field_of(d, "h"), field_of(d, "scaleW"), field_of(d, "scaleH"));
+    let (prev_w, prev_h, prev_sw, prev_sh) = (field_of(d, "prevw"), field_of(d, "prevh"), field_of(d, "prevscaleW"), field_of(d, "prevscaleH"));
+    if w_s != prev_w {
+        if let Some(inches) = parse_shown(&w_s) {
+            let w_pt = inches * 72.0;
+            d.fields.insert("wPt".into(), w_pt.to_string());
+            let pct = scale_of(w_pt, base_w);
+            publish_dim(d, "scaleW", pct, num_text(pct));
+            if lock {
+                let h_pt = if ar > 0.0 { w_pt / ar } else { w_pt };
+                publish_dim(d, "h", h_pt, num_text(h_pt / 72.0));
+                let hp = scale_of(h_pt, base_h);
+                publish_dim(d, "scaleH", hp, num_text(hp));
+            }
+        }
+    } else if h_s != prev_h {
+        if let Some(inches) = parse_shown(&h_s) {
+            let h_pt = inches * 72.0;
+            d.fields.insert("hPt".into(), h_pt.to_string());
+            let pct = scale_of(h_pt, base_h);
+            publish_dim(d, "scaleH", pct, num_text(pct));
+            if lock {
+                let w_pt = h_pt * ar;
+                publish_dim(d, "w", w_pt, num_text(w_pt / 72.0));
+                let wp = scale_of(w_pt, base_w);
+                publish_dim(d, "scaleW", wp, num_text(wp));
+            }
+        }
+    } else if sw_s != prev_sw {
+        if let Some(pct) = parse_shown(&sw_s) {
+            let w_pt = base_w * pct / 100.0;
+            d.fields.insert("scaleWPt".into(), pct.to_string());
+            publish_dim(d, "w", w_pt, num_text(w_pt / 72.0));
+            if lock {
+                let h_pt = if ar > 0.0 { w_pt / ar } else { w_pt };
+                publish_dim(d, "h", h_pt, num_text(h_pt / 72.0));
+                publish_dim(d, "scaleH", pct, num_text(pct));
+            }
+        }
+    } else if sh_s != prev_sh {
+        if let Some(pct) = parse_shown(&sh_s) {
+            let h_pt = base_h * pct / 100.0;
+            d.fields.insert("scaleHPt".into(), pct.to_string());
+            publish_dim(d, "h", h_pt, num_text(h_pt / 72.0));
+            if lock {
+                let w_pt = h_pt * ar;
+                publish_dim(d, "w", w_pt, num_text(w_pt / 72.0));
+                publish_dim(d, "scaleW", pct, num_text(pct));
+            }
+        }
+    } else if lock
+        && !was_locked
+        && let Some(w_pt) = current_points(d, "w")
+    {
+        let h_pt = if ar > 0.0 { w_pt / ar } else { w_pt };
+        publish_dim(d, "h", h_pt, num_text(h_pt / 72.0));
+        let hp = scale_of(h_pt, base_h);
+        publish_dim(d, "scaleH", hp, num_text(hp));
+        let wp = scale_of(w_pt, base_w);
+        publish_dim(d, "scaleW", wp, num_text(wp));
+    }
+    for key in ["x", "y", "w", "h", "rot", "scaleW", "scaleH"] {
+        let v = field_of(d, key);
+        d.fields.insert(format!("prev{key}"), v);
+    }
+    d.fields.insert("prevlock".into(), if lock { "1".into() } else { "0".into() });
+}
+
+fn shown_points(d: &Dialog, key: &str, label: &str) -> Result<f64, String> {
+    if edited(d, key) {
+        let n = parse_shown(&field_of(d, key)).ok_or_else(|| format!("{label} must be a number"))?;
+        return Ok(n * 72.0);
+    }
+    exact_of(d, key).ok_or_else(|| format!("{label} must be a number"))
+}
+
+fn shown_number(d: &Dialog, key: &str, label: &str) -> Result<f64, String> {
+    if edited(d, key) {
+        return parse_shown(&field_of(d, key)).ok_or_else(|| format!("{label} must be a number"));
+    }
+    exact_of(d, key).ok_or_else(|| format!("{label} must be a number"))
+}
+
+fn size_position_value(d: &Dialog) -> Result<Value, String> {
+    let x = shown_points(d, "x", "Horizontal")?;
+    let y = shown_points(d, "y", "Vertical")?;
+    let rot = shown_number(d, "rot", "Rotation")?;
+    let base_w = parse_shown(&field_of(d, "baseW")).unwrap_or(1.0);
+    let base_h = parse_shown(&field_of(d, "baseH")).unwrap_or(1.0);
+    let mut w = if edited(d, "w") {
+        shown_points(d, "w", "Width")?
+    } else if edited(d, "scaleW") {
+        base_w * shown_number(d, "scaleW", "Scale width")? / 100.0
+    } else {
+        shown_points(d, "w", "Width")?
+    };
+    let mut h = if edited(d, "h") {
+        shown_points(d, "h", "Height")?
+    } else if edited(d, "scaleH") {
+        base_h * shown_number(d, "scaleH", "Scale height")? / 100.0
+    } else {
+        shown_points(d, "h", "Height")?
+    };
+    if field_of(d, "lock") == "1" {
+        let ar = if base_h > 0.0 { base_w / base_h } else { 1.0 };
+        let width_drives = edited(d, "w") || edited(d, "scaleW") || (!edited(d, "h") && !edited(d, "scaleH"));
+        if width_drives {
+            h = if ar > 0.0 { w / ar } else { h };
+        } else {
+            w = h * ar;
+        }
+    }
+    Ok(json!({"x": x, "y": y, "w": w, "h": h, "rot": rot, "lockAspect": field_of(d, "lock") == "1"}))
+}
+
+fn text_row(ui: &mut Ui, d: &mut Dialog, label: &str, key: &str) {
+    let mut v = field_of(d, key);
+    ui.horizontal(|ui| {
+        ui.add_sized(vec2(148.0, 20.0), egui::Label::new(label));
+        ui.add(egui::TextEdit::singleline(&mut v).desired_width(96.0));
+    });
+    d.fields.insert(key.into(), v);
+}
+
+fn size_position_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
+    seed_size_position(app, d);
+    ui.label(egui::RichText::new("Size").strong());
+    text_row(ui, d, "Height (in):", "h");
+    text_row(ui, d, "Width (in):", "w");
+    text_row(ui, d, "Rotation (°):", "rot");
+    text_row(ui, d, "Scale height (%):", "scaleH");
+    text_row(ui, d, "Scale width (%):", "scaleW");
+    check(ui, d, "Lock aspect ratio", "lock", false);
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("Position").strong());
+    ui.label("From the top-left corner of the slide");
+    text_row(ui, d, "Horizontal (in):", "x");
+    text_row(ui, d, "Vertical (in):", "y");
+    reconcile_size_fields(d);
+    let (ok, cancel) = buttons(ui, "OK");
+    if ok {
+        match size_position_value(d) {
+            Ok(p) => return app.run("shape.sizePosition", p).is_ok(),
+            Err(msg) => {
+                app.set_status(msg);
+                return false;
+            }
+        }
+    }
+    cancel
+}
+
 fn pretty_equation(s: &str) -> String {
     let sup = |c: char| match c {
         '0' => '⁰',
@@ -846,128 +1216,6 @@ pub fn paint_logo(p: &egui::Painter, r: Rect) {
     ));
 }
 
-/// The start screen (no presentation open): new from themes, open, recent files.
-pub fn start_screen(app: &mut SlideApp, ui: &mut Ui) {
-    let t = Tokens::get(ui.ctx());
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.add_space(24.0);
-        ui.horizontal(|ui| {
-            ui.add_space(40.0);
-            let (r, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
-            paint_logo(ui.painter(), r);
-            ui.label(egui::RichText::new("DeckCraft").font(theme::bold(26.0)));
-        });
-        if app.home_open() {
-            let title = app.session.active().map(|d| d.title()).unwrap_or_default();
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.add_space(40.0);
-                if ui.button(format!("← Back to {title}")).on_hover_text("Esc").clicked() {
-                    let _ = app.run("app.home", json!({"on": false}));
-                }
-            });
-        }
-        ui.add_space(16.0);
-        ui.horizontal(|ui| {
-            ui.add_space(40.0);
-            ui.label(egui::RichText::new("New presentation").font(theme::bold(16.0)));
-        });
-        ui.add_space(8.0);
-        inset_wrapped(ui, |ui| {
-            for th in deckcraft_model::theme::builtin_themes() {
-                let (r, resp) = ui.allocate_exact_size(vec2(180.0, 128.0), Sense::click());
-                let tile = Rect::from_min_size(r.min, vec2(180.0, 101.0));
-                ribbon::paint_theme_tile(ui.painter(), tile, &th);
-                if resp.hovered() {
-                    ui.painter().rect_stroke(tile, CornerRadius::same(2), Stroke::new(2.0, t.accent), egui::StrokeKind::Outside);
-                }
-                ui.painter().text(pos2(r.min.x, r.max.y - 10.0), Align2::LEFT_CENTER, &th.name, theme::font(12.0), t.text);
-                if resp.clicked() {
-                    let _ = app.run("file.new", json!({"theme": th.name}));
-                }
-            }
-        });
-        ui.add_space(16.0);
-        ui.horizontal(|ui| {
-            ui.add_space(40.0);
-            if ui.button("Open…").clicked() {
-                let _ = app.run("app.openDialog", json!({}));
-            }
-            if ui.button("Open the sample deck").clicked()
-                && let Err(e) = deckcraft_engine::sample::open_sample(&mut app.session)
-            {
-                app.set_status(e.to_string());
-            }
-        });
-        if !app.ui.recent.is_empty() {
-            ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                ui.add_space(40.0);
-                ui.label(egui::RichText::new("Recent").font(theme::bold(16.0)));
-            });
-            for p in app.ui.recent.clone() {
-                ui.horizontal(|ui| {
-                    ui.add_space(40.0);
-                    if ui.link(&p).clicked()
-                        && let Err(e) = app.open_path(&p)
-                    {
-                        app.set_status(e);
-                    }
-                });
-            }
-        }
-        ui.add_space(30.0);
-        ui.horizontal(|ui| {
-            ui.add_space(40.0);
-            ui.hyperlink_to("Join the ArtCraft community on Discord", deckcraft_engine::links::DISCORD);
-        });
-    });
-}
-
-/// Wrapped rows that all start 40 points in from the left, in line with the start screen's
-/// headings. The inset is a margin on the container: an `add_space` inside `horizontal_wrapped`
-/// would indent only the first row.
-fn inset_wrapped(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui)) {
-    egui::Frame::NONE.inner_margin(egui::Margin { left: 40, ..Default::default() }).show(ui, |ui| {
-        ui.horizontal_wrapped(add_contents);
-    });
-}
-
-/// PDF bytes with the export dialog's options (web: downloaded instead of written).
-fn deckcraft_pdf_bytes(doc: &deckcraft_model::Presentation, params: &serde_json::Value) -> Vec<u8> {
-    deckcraft_engine::cmd::file::pdf_bytes(doc, params).unwrap_or_default()
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::cell::{Cell, RefCell};
-
-    /// Start screen theme tiles that wrap onto a second row keep the 40-point inset (#17).
-    #[test]
-    fn inset_wrapped_indents_every_row() {
-        let left = Cell::new(0.0_f32);
-        let tiles = RefCell::new(Vec::<Rect>::new());
-        let mut harness = egui_kittest::Harness::builder().with_size(vec2(500.0, 400.0)).build_ui(|ui| {
-            left.set(ui.max_rect().left());
-            tiles.borrow_mut().clear();
-            inset_wrapped(ui, |ui| {
-                for _ in 0..4 {
-                    let (r, _) = ui.allocate_exact_size(vec2(180.0, 128.0), Sense::click());
-                    tiles.borrow_mut().push(r);
-                }
-            });
-        });
-        harness.run();
-        let tiles = tiles.borrow().clone();
-        let first_top = tiles.first().map_or(0.0, |r| r.top());
-        assert!(tiles.iter().any(|r| r.top() > first_top), "tiles should wrap onto a second row: {tiles:?}");
-        let mut row_top = f32::NEG_INFINITY;
-        for r in &tiles {
-            if r.top() > row_top {
-                row_top = r.top();
-                assert!((r.left() - (left.get() + 40.0)).abs() < 0.5, "row starts at {} instead of {}", r.left(), left.get() + 40.0);
-            }
-        }
-    }
-}
+#[path = "size_position_tests.rs"]
+mod size_position_tests;
