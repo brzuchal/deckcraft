@@ -12,7 +12,34 @@ use crate::widgets::{self, RIBBON_H, big_button, big_button_ex, color_split, dro
 
 pub const TITLE_H: f32 = 38.0;
 
+/// macOS draws the window into the title bar (`with_fullsize_content_view`) and AppKit paints the
+/// traffic lights itself, 16 pt from the top of the window on macOS 27. Moving them would take
+/// AppKit calls (`unsafe`, forbidden here), so on macOS the title bar is the band they are centred
+/// in, with the controls beside them (#71). Up to macOS 15 the lights are smaller and centred 14 pt
+/// from the top, about 2 pt above this bar's centre.
+pub const MAC_TITLE_BAR: f32 = 32.0;
+/// The traffic lights as AppKit lays them out, measured on macOS 27: button diameter,
+/// centre-to-centre pitch and the first button's left edge.
+const MAC_LIGHT: f32 = 14.0;
+const MAC_LIGHT_PITCH: f32 = 23.0;
+const MAC_LIGHTS_LEFT: f32 = 9.0;
+/// Where title-bar content starts on macOS: the end of the three lights plus the gap the lights
+/// keep from the top of the window.
+pub const MAC_CONTENT_LEFT: f32 = MAC_LIGHTS_LEFT + 2.0 * MAC_LIGHT_PITCH + MAC_LIGHT + (MAC_TITLE_BAR - MAC_LIGHT) / 2.0;
+
+/// The title bar's height, the left edge of its content and the height of its tallest control.
+/// With the integrated title bar (macOS) the bar is shorter, so the controls shrink to keep a
+/// margin above and below them.
+fn title_geometry(integrated: bool) -> (f32, f32, f32) {
+    if integrated { (MAC_TITLE_BAR, MAC_CONTENT_LEFT, 22.0) } else { (TITLE_H, 10.0, 26.0) }
+}
+
 /// Is engine command `id` enabled right now?
+/// Whether `id` names an engine or UI command.
+pub fn known(id: &str) -> bool {
+    deckcraft_engine::find_command(id).is_some() || crate::UI_COMMANDS.iter().any(|c| c.0 == id)
+}
+
 pub fn enabled(app: &SlideApp, id: &str) -> bool {
     match deckcraft_engine::find_command(id) {
         Some(c) => (c.enabled)(&app.session).is_ok(),
@@ -27,7 +54,8 @@ fn run(app: &mut SlideApp, id: &str, p: Value) {
 /// The window's title row: traffic-light space, quick access, centred title, actions.
 pub fn title_bar(app: &mut SlideApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
-    egui::Panel::top("title_bar").exact_size(TITLE_H).frame(egui::Frame::NONE.fill(t.chrome)).show(ui, |ui| {
+    let (height, left, control_h) = title_geometry(app.integrated_titlebar);
+    egui::Panel::top("title_bar").exact_size(height).frame(egui::Frame::NONE.fill(t.chrome)).show(ui, |ui| {
         let rect = ui.max_rect();
         // Dragging the empty title bar moves the window.
         let drag = ui.interact(rect, ui.id().with("titledrag"), Sense::click_and_drag());
@@ -38,7 +66,6 @@ pub fn title_bar(app: &mut SlideApp, ui: &mut Ui) {
             let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
         }
-        let left = if app.integrated_titlebar { 84.0 } else { 10.0 };
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(Rect::from_min_max(pos2(rect.min.x + left, rect.min.y), pos2(rect.min.x + 420.0, rect.max.y)))
@@ -47,24 +74,7 @@ pub fn title_bar(app: &mut SlideApp, ui: &mut Ui) {
         child.spacing_mut().item_spacing.x = 2.0;
         let has_doc = app.session.active().is_some();
         let dirty = app.session.active().is_some_and(|d| d.is_dirty());
-        if icon_toggle(&mut child, Icon::Home, "Home", true, app.backstage_open()).clicked() {
-            let _ = app.run("app.home", json!({}));
-        }
-        if icon_toggle(&mut child, Icon::Save, "Save (⌘S)", has_doc, false).clicked() {
-            app.save();
-        }
-        if icon_toggle(&mut child, Icon::Export, "Export…", has_doc, false).clicked() {
-            let _ = app.run("app.exportDialog", json!({}));
-        }
-        if icon_toggle(&mut child, Icon::Undo, "Undo (⌘Z)", enabled(app, "edit.undo"), false).clicked() {
-            run(app, "edit.undo", json!({}));
-        }
-        if icon_toggle(&mut child, Icon::Redo, "Redo (⌘Y)", enabled(app, "edit.redo"), false).clicked() {
-            run(app, "edit.redo", json!({}));
-        }
-        if icon_toggle(&mut child, Icon::PlayFromStart, "Play from Start (F5)", has_doc, false).clicked() {
-            app.start_show(app.show_start_index(), false);
-        }
+        crate::qat::show(app, &mut child);
         let title =
             app.session.active().map(|d| format!("{}{}", d.title(), if dirty { " — Edited" } else { "" })).unwrap_or_else(|| "DeckCraft".into());
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, title, theme::font(13.0), t.text);
@@ -81,8 +91,8 @@ pub fn title_bar(app: &mut SlideApp, ui: &mut Ui) {
         let share = right.add(
             egui::Button::new(egui::RichText::new("  Present  ").color(t.accent_text).font(theme::bold(13.0)))
                 .fill(t.accent)
-                .corner_radius(CornerRadius::same(13))
-                .min_size(vec2(84.0, 26.0)),
+                .corner_radius(control_h / 2.0)
+                .min_size(vec2(84.0, control_h)),
         );
         if share.clicked() && has_doc {
             let from = app.session.active().map(|d| d.selection.slide).unwrap_or(0);
@@ -242,14 +252,16 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
 
 fn big(app: &mut SlideApp, ui: &mut Ui, icon: Icon, label: &str, id: &str, p: Value) {
     let en = enabled(app, id);
-    let resp = big_button(ui, icon, label, en);
+    let r = big_button(ui, icon, label, en);
     if id == "insert.dateTime" {
         let name = label.replace('\n', " ");
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, en, &name));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, en, &name));
     }
-    if resp.on_hover_text(tip(id, label)).clicked() {
-        run(app, id, p);
+    let r = r.on_hover_text(tip(id, label));
+    if r.clicked() {
+        run(app, id, p.clone());
     }
+    crate::qat::ribbon_menu(app, &r, icon, label, id, &p);
 }
 
 /// Photo Album is a split button: the main click starts a new album, the arrow edits one.
@@ -275,9 +287,11 @@ fn photo_album_button(app: &mut SlideApp, ui: &mut Ui) {
 
 fn small(app: &mut SlideApp, ui: &mut Ui, icon: Icon, label: &str, id: &str, p: Value) {
     let en = enabled(app, id);
-    if small_button(ui, icon, label, en, false).on_hover_text(tip(id, label)).clicked() {
-        run(app, id, p);
+    let r = small_button(ui, icon, label, en, false).on_hover_text(tip(id, label));
+    if r.clicked() {
+        run(app, id, p.clone());
     }
+    crate::qat::ribbon_menu(app, &r, icon, label, id, &p);
 }
 
 fn toggle(app: &mut SlideApp, ui: &mut Ui, icon: Icon, label: &str, id: &str, on: bool) {
@@ -381,8 +395,7 @@ fn layout_menu(app: &mut SlideApp, ui: &mut Ui, cmd: &str) {
                             ..Default::default()
                         },
                     );
-                    let tex =
-                        ui.ctx().load_texture(format!("layout-{li}"), crate::textures::to_color_image(&img, false), egui::TextureOptions::LINEAR);
+                    let tex = crate::textures::upload(ui.ctx(), format!("layout-{li}"), crate::textures::to_color_image(&img, false));
                     ui.painter().image(tex.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 }
                 let t = Tokens::get(ui.ctx());
@@ -1173,6 +1186,10 @@ fn insert(app: &mut SlideApp, ui: &mut Ui) {
                 app.dialog = Some(crate::dialogs::Dialog::new("table"));
                 ui.close();
             }
+            if ui.button("Draw Table").clicked() {
+                app.session.set_tool(deckcraft_engine::ToolKind::Shape { preset: deckcraft_engine::tools::DRAW_TABLE.into() });
+                ui.close();
+            }
         });
     });
     group(ui, |ui| {
@@ -1193,8 +1210,13 @@ fn insert(app: &mut SlideApp, ui: &mut Ui) {
         big(app, ui, Icon::SmartArt, "SmartArt", "app.dialog", json!({"id": "smartart"}));
         let r = big_button(ui, Icon::Chart, "Chart", enabled(app, "insert.chart"));
         egui::Popup::menu(&r).show(|ui| {
-            for k in deckcraft_model::chart::ChartType::MAIN {
-                if ui.button(k.label()).clicked() {
+            for k in chart_menu_types() {
+                if k.is_none() {
+                    ui.separator();
+                }
+                if let Some(k) = k
+                    && ui.button(k.label()).clicked()
+                {
                     run(app, "insert.chart", json!({"type": format!("{k:?}")}));
                 }
             }
@@ -1397,8 +1419,12 @@ fn draw(app: &mut SlideApp, ui: &mut Ui) {
         }
     });
     group(ui, |ui| {
-        let r = big_button(ui, Icon::InkToShape, "Ink to\nShape", false);
-        let _ = r.on_hover_text("Ink to Shape (coming soon)");
+        let has_ink = app.session.doc().is_ok_and(|d| d.shapes().iter().any(|s| matches!(s.kind, deckcraft_model::ShapeKind::Ink { .. })));
+        let r = big_button(ui, Icon::InkToShape, "Ink to\nShape", has_ink);
+        if r.on_hover_text("Ink to Shape: turn drawn lines, rectangles, ovals and triangles into shapes").clicked() {
+            app.session.set_tool(ToolKind::Select);
+            run(app, "draw.inkToShape", json!({}));
+        }
         let r = big_button(ui, Icon::InkToText, "Ink to\nText", false);
         let _ = r.on_hover_text("Ink to Text (coming soon)");
         let r = big_button(ui, Icon::InkToMath, "Ink to\nMath", false);
@@ -1433,6 +1459,29 @@ fn design(app: &mut SlideApp, ui: &mut Ui) {
             run(app, "app.browseThemeDialog", json!({}));
         }
     });
+    // Variants: the current theme in its four colour variations.
+    if let Some(th) = app.session.active().and_then(|d| d.doc.masters.first().map(|m| m.theme.clone())) {
+        let variants = deckcraft_model::theme::theme_variants(&th);
+        let tiles: Vec<deckcraft_model::Theme> = variants.iter().map(|c| deckcraft_model::Theme { colors: c.clone(), ..th.clone() }).collect();
+        let names: Vec<String> = variants.iter().map(|c| c.name.clone()).collect();
+        let sel = variants.iter().position(|c| c.colors == th.colors.colors);
+        group(ui, |ui| {
+            if let Some(i) = widgets::gallery(
+                ui,
+                tiles.len(),
+                vec2(84.0, 56.0),
+                sel,
+                |p, r, i| {
+                    if let Some(t) = tiles.get(i) {
+                        paint_theme_tile(p, r, t);
+                    }
+                },
+                |i| names.get(i).cloned().unwrap_or_default(),
+            ) {
+                run(app, "design.variant", json!({"index": i}));
+            }
+        });
+    }
     group(ui, |ui| {
         let r = big_button(ui, Icon::Colors, "Colors", true);
         r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Colors"));
@@ -1600,12 +1649,14 @@ fn transitions(app: &mut SlideApp, ui: &mut Ui) {
         });
     });
     group(ui, |ui| {
-        let opts: &[&str] = deckcraft_model::anim::TRANSITIONS.iter().find(|x| x.0 == kind).map(|x| x.4).unwrap_or(&[]);
-        let r = big_button(ui, Icon::EffectOptions, "Effect\nOptions", !opts.is_empty());
+        let selected = cur.as_ref().map(|t| t.option.as_str());
+        let rows = transition_effect_rows(&kind, selected);
+        let r = big_button(ui, Icon::EffectOptions, "Effect\nOptions", !rows.is_empty());
         egui::Popup::menu(&r).show(|ui| {
-            for o in opts {
-                if ui.button(deckcraft_model::anim::transition_option_label(&kind, o)).clicked() {
+            for &(o, on) in &rows {
+                if ui.selectable_label(on, deckcraft_model::anim::transition_option_label(&kind, o)).clicked() {
                     run(app, "transition.options", json!({"option": o}));
+                    ui.close();
                 }
             }
         });
@@ -1786,13 +1837,10 @@ fn animations(app: &mut SlideApp, ui: &mut Ui) {
         s.animations.iter().find(|a| a.shape == *id).cloned()
     });
     group(ui, |ui| {
-        if big_button(ui, Icon::Preview, "Preview", true).clicked() {
-            let from = app.session.active().map(|d| d.selection.slide).unwrap_or(0);
-            app.start_show(from, true);
-            if let Some(s) = app.show.as_mut() {
-                s.preview_only = true;
-                s.autoplay = true;
-            }
+        let playing = app.anim_preview_active();
+        let (resp, _) = big_button_ex(ui, Icon::Preview, "Preview", true, false, playing);
+        if resp.on_hover_text("Play this slide's animations on the canvas").clicked() {
+            run(app, "animation.preview", json!({}));
         }
     });
     group(ui, |ui| {
@@ -1854,18 +1902,23 @@ fn animations(app: &mut SlideApp, ui: &mut Ui) {
                 });
             }
         });
-        let opts: &[&str] = cur.as_ref().and_then(|c| deckcraft_model::anim::animation_info(&c.effect, c.class)).map(|x| x.5).unwrap_or(&[]);
-        let r = big_button(ui, Icon::EffectOptions, "Effect\nOptions", !opts.is_empty());
+        let effect_rows = cur.as_ref().map(|c| animation_effect_rows(&c.effect, c.class, Some(c.option.as_str()))).unwrap_or_default();
+        let build = cur.as_ref().map(|c| text_build_id(c.text_build));
+        let build_rows = marked_options(&["asOne", "byParagraph"], build);
+        let r = big_button(ui, Icon::EffectOptions, "Effect\nOptions", !effect_rows.is_empty());
         egui::Popup::menu(&r).show(|ui| {
-            for o in opts {
-                if ui.button(option_label(o)).clicked() {
+            for &(o, on) in &effect_rows {
+                if ui.selectable_label(on, option_label(o)).clicked() {
                     run(app, "animation.options", json!({"option": o}));
+                    ui.close();
                 }
             }
             ui.separator();
-            for (l, b) in [("As One Object", "asOne"), ("By Paragraph", "byParagraph")] {
-                if ui.button(l).clicked() {
-                    run(app, "animation.options", json!({"textBuild": b}));
+            for &(id, on) in &build_rows {
+                let label = if id == "byParagraph" { "By Paragraph" } else { "As One Object" };
+                if ui.selectable_label(on, label).clicked() {
+                    run(app, "animation.options", json!({"textBuild": id}));
+                    ui.close();
                 }
             }
         });
@@ -2770,6 +2823,18 @@ fn table_design(app: &mut SlideApp, ui: &mut Ui) {
             });
         });
     });
+    // Draw Borders: the pencil splits cells along a line, the eraser merges across a border.
+    group(ui, |ui| {
+        use deckcraft_engine::ToolKind;
+        use deckcraft_engine::tools::{DRAW_TABLE, TABLE_ERASER};
+        let cur = app.session.tool.kind.clone();
+        for (icon, label, preset) in [(Icon::Pencil, "Draw Table", DRAW_TABLE), (Icon::Eraser, "Table Eraser", TABLE_ERASER)] {
+            let on = matches!(&cur, ToolKind::Shape { preset: p } if p == preset);
+            if big_button_ex(ui, icon, label, true, false, on).0.clicked() {
+                app.session.set_tool(if on { ToolKind::Select } else { ToolKind::Shape { preset: preset.into() } });
+            }
+        }
+    });
 }
 
 /// A Picture Styles gallery tile: a landscape "picture" in the style's shape and frame.
@@ -2929,7 +2994,11 @@ fn chart_design(app: &mut SlideApp, ui: &mut Ui) {
     group(ui, |ui| {
         let r = big_button(ui, Icon::ChangeChartType, "Change\nChart Type", true);
         egui::Popup::menu(&r).show(|ui| {
-            for k in deckcraft_model::chart::ChartType::MAIN {
+            for k in chart_menu_types() {
+                let Some(k) = k else {
+                    ui.separator();
+                    continue;
+                };
                 if ui.button(k.label()).clicked() {
                     // Replace the chart's type keeping its data.
                     if let Some(id) = app.session.active().and_then(|d| d.selection.shapes.first().copied()) {
@@ -3227,6 +3296,32 @@ fn handout_master(app: &mut SlideApp, ui: &mut Ui) {
     });
 }
 
+/// The stored id is the one marked row. Every other id stays unmarked.
+fn marked_options<'a>(options: &'a [&'a str], current: Option<&str>) -> Vec<(&'a str, bool)> {
+    options.iter().copied().map(|o| (o, current == Some(o))).collect()
+}
+
+/// One row of Transitions ▸ Effect Options: the stored option and whether it is the current one.
+fn transition_effect_rows(kind: &str, current: Option<&str>) -> Vec<(&'static str, bool)> {
+    let opts = deckcraft_model::anim::TRANSITIONS.iter().find(|x| x.0 == kind).map(|x| x.4).unwrap_or(&[]);
+    marked_options(opts, current)
+}
+
+/// One row of Animations ▸ Effect Options for the selected effect.
+fn animation_effect_rows(effect: &str, class: AnimClass, current: Option<&str>) -> Vec<(&'static str, bool)> {
+    let opts = deckcraft_model::anim::animation_info(effect, class).map(|x| x.5).unwrap_or(&[]);
+    marked_options(opts, current)
+}
+
+fn text_build_id(build: deckcraft_model::anim::TextBuild) -> &'static str {
+    match build {
+        deckcraft_model::anim::TextBuild::ByParagraph => "byParagraph",
+        deckcraft_model::anim::TextBuild::ByWord => "byWord",
+        deckcraft_model::anim::TextBuild::ByLetter => "byLetter",
+        deckcraft_model::anim::TextBuild::AsOne => "asOne",
+    }
+}
+
 /// Gallery glyphs for the freeform tools: a wave (curve), a polygon (freeform), a squiggle (scribble).
 fn paint_freeform_icon(p: &egui::Painter, r: Rect, name: &str, ink: Color32) {
     let at = |x: f32, y: f32| egui::pos2(r.min.x + x * r.width(), r.min.y + y * r.height());
@@ -3240,9 +3335,20 @@ fn paint_freeform_icon(p: &egui::Painter, r: Rect, name: &str, ink: Color32) {
     p.add(egui::Shape::line(pts, egui::Stroke::new(1.3, ink)));
 }
 
+/// The chart types in the Insert Chart and Change Chart Type menus: the main ones, a separator
+/// (`None`), then the Office 2016 types not already listed.
+fn chart_menu_types() -> Vec<Option<deckcraft_model::chart::ChartType>> {
+    use deckcraft_model::chart::ChartType;
+    let mut v: Vec<Option<ChartType>> = ChartType::MAIN.iter().copied().map(Some).collect();
+    v.push(None);
+    v.extend(ChartType::OFFICE_2016.iter().copied().filter(|k| !ChartType::MAIN.contains(k)).map(Some));
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deckcraft_model::anim::TextBuild;
 
     /// Paints one transition tile and one animation tile and returns the colour of every label.
     fn tile_label_colours(dark: bool) -> Vec<Color32> {
@@ -3272,6 +3378,26 @@ mod tests {
         let light = tile_label_colours(false);
         assert_eq!(light, vec![Tokens::light().text; 2]);
     }
+
+    fn marked(rows: Vec<(&str, bool)>) -> Vec<&str> {
+        rows.into_iter().filter(|(_, on)| *on).map(|(id, _)| id).collect()
+    }
+
+    #[test]
+    fn effect_options_mark_only_the_stored_choice() {
+        assert_eq!(marked(transition_effect_rows("push", Some("l"))), vec!["l"]);
+        assert_eq!(transition_effect_rows("push", Some("l")).into_iter().map(|(_, on)| on).collect::<Vec<_>>(), vec![false, false, true, false]);
+        assert_eq!(marked(transition_effect_rows("fade", Some("throughBlack"))), vec!["throughBlack"]);
+        assert!(marked(transition_effect_rows("push", Some("missing"))).is_empty());
+        assert!(transition_effect_rows("none", None).is_empty());
+        assert_eq!(marked(transition_effect_rows("cut", Some(""))), vec![""]);
+        assert_eq!(marked(animation_effect_rows("fly", AnimClass::Entrance, Some("l"))), vec!["l"]);
+        assert!(marked(animation_effect_rows("fly", AnimClass::Entrance, Some("nope"))).is_empty());
+        assert!(animation_effect_rows("appear", AnimClass::Entrance, Some("l")).is_empty());
+        assert_eq!(marked(marked_options(&["asOne", "byParagraph"], Some(text_build_id(TextBuild::ByParagraph)))), vec!["byParagraph"]);
+        assert_eq!(marked(marked_options(&["asOne", "byParagraph"], Some(text_build_id(TextBuild::AsOne)))), vec!["asOne"]);
+        assert!(marked(marked_options(&["asOne", "byParagraph"], Some(text_build_id(TextBuild::ByWord)))).is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -3281,3 +3407,30 @@ mod effects_tests;
 #[cfg(test)]
 #[path = "master_layout_tests.rs"]
 mod master_layout_tests;
+
+#[cfg(test)]
+mod title_bar_tests {
+    use super::*;
+
+    #[test]
+    fn mac_title_bar_centres_and_clears_the_traffic_lights() {
+        let (h, left, control) = title_geometry(true);
+        // AppKit centres the lights in its own band, so the bar is that band.
+        assert_eq!(h, MAC_TITLE_BAR);
+        // Content keeps the same gap after the lights as the lights keep from the top.
+        let lights_end = MAC_LIGHTS_LEFT + 2.0 * MAC_LIGHT_PITCH + MAC_LIGHT;
+        assert_eq!(left - lights_end, (h - MAC_LIGHT) / 2.0);
+        // The tallest controls keep at least 4 pt above and below.
+        assert!(control <= h - 8.0);
+        // Other platforms keep their system frame and the original bar.
+        assert_eq!(title_geometry(false), (TITLE_H, 10.0, 26.0));
+    }
+}
+
+#[cfg(test)]
+#[path = "drawtable_tests.rs"]
+mod drawtable_tests;
+
+#[cfg(test)]
+#[path = "inktoshape_tests.rs"]
+mod inktoshape_tests;

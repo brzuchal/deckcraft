@@ -1,12 +1,14 @@
 //! PPTX import: package → [`Presentation`].
 
-mod chart;
+pub(crate) mod chart;
+mod chartex;
 pub(crate) mod dml;
 mod shapes;
 mod theme;
 mod timing;
 
 pub(crate) use chart::{chart_from as chart_from_el, read_chart_xml};
+pub(crate) use chartex::{chartex_from, read_chartex_xml};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -155,7 +157,16 @@ pub fn keep_xml(el: &El, ns: &[(String, String)]) -> String {
 }
 
 /// Namespace prefixes whose `mc:Choice` content we understand.
-const SUPPORTED_MC: [&str; 9] = ["p14", "p15", "p159", "a14", "a16", "p1510", "a15", "c14", "p188"];
+const SUPPORTED_MC: [&str; 10] = ["p14", "p15", "p159", "a14", "a16", "p1510", "a15", "c14", "p188", "cx1"];
+
+/// Office 2016 charts sit in a `cx1` choice; take it only for a layout DeckCraft reads (the
+/// fallback is a picture or "this chart isn't available" text). The part is checked later, when
+/// the frame is read, so here only the namespace counts.
+fn chartex_readable(ch: &El) -> bool {
+    let mut found = vec![];
+    ch.find_all("graphicData", &mut found);
+    found.iter().any(|g| g.attr("uri").is_some_and(|u| u.ends_with("/chartex")))
+}
 
 /// A relationship to an embedded 3-D model (`.glb`).
 pub(crate) fn is_model3d(rel: &opc::Rel) -> bool {
@@ -285,7 +296,8 @@ fn resolve_mc_rels(el: &mut El, depth: usize, rels: Option<&Rels>) {
                     let choice = ac.children_named("Choice").find(|ch| {
                         let req_ok = ch.attr("Requires").unwrap_or("").split_whitespace().all(|r| SUPPORTED_MC.contains(&r));
                         // Ink content parts are not modelled; prefer their fallback picture.
-                        let modelled = !ch.elements().any(|e| e.is("contentPart"));
+                        let modelled = !ch.elements().any(|e| e.is("contentPart"))
+                            && (!ch.attr("Requires").unwrap_or("").contains("cx1") || chartex_readable(ch));
                         req_ok && modelled
                     });
                     let branch = choice.or_else(|| ac.child("Fallback"));
@@ -645,6 +657,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, PptxError> {
     p.kept_parts = kept_parts(&pkg, &pres_path);
 
     inherit_placeholder_geometry(&mut p);
+    default_text_anchor(&mut p);
     p.header_footer = header_footer(&p);
     p.embedded_fonts = read_embedded_fonts(&mut imp, &pres_part, pres_el);
     p.media = std::mem::take(&mut imp.media);
@@ -730,6 +743,53 @@ pub fn has_rel_refs(el: &El) -> bool {
 
 pub fn color_map(cm: &El) -> Vec<(String, String)> {
     cm.attrs.iter().filter(|(k, _)| !k.starts_with("xmlns")).map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+/// The anchor the theme's shape defaults (`a:objectDefaults/a:spDef/a:bodyPr`) give new shapes
+/// text, if any.
+fn theme_shape_anchor(t: &deckcraft_model::Theme) -> Option<deckcraft_model::text::Anchor> {
+    let raw = t.raw_extra.as_deref()?;
+    let sp = &raw[raw.find("spDef")?..];
+    let sp = &sp[..sp.find("/a:spDef").or_else(|| sp.find("txDef")).unwrap_or(sp.len())];
+    let b = &sp[sp.find("bodyPr")?..];
+    let b = &b[..b.find('>').unwrap_or(b.len())];
+    let v = &b[b.find("anchor=\"")? + 8..];
+    deckcraft_model::text::Anchor::from_xml(&v[..v.find('"')?])
+}
+
+/// A shape's text without an anchor of its own sits at the top, as the standard has it (or where
+/// the theme's shape defaults put it). The model's own default for shapes is the middle, so a
+/// top or bottom anchor is made explicit here and a middle one left unset (placeholders and text
+/// boxes keep inheriting).
+fn default_text_anchor(p: &mut Presentation) {
+    fn fix(shapes: &mut [deckcraft_model::Shape], a: deckcraft_model::text::Anchor) {
+        walk_shapes_mut(shapes, &mut |s| {
+            if s.ph.is_none()
+                && !s.text_box
+                && !matches!(s.kind, deckcraft_model::ShapeKind::Table(_))
+                && let Some(t) = &mut s.text
+            {
+                // Middle is the model's own default for shapes, so it is kept as unset.
+                let got = t.body.anchor.unwrap_or(a);
+                t.body.anchor = (got != deckcraft_model::text::Anchor::Middle).then_some(got);
+            }
+        });
+    }
+    let top = deckcraft_model::text::Anchor::Top;
+    let anchors: Vec<_> = p.masters.iter().map(|m| (m.id, theme_shape_anchor(&m.theme).unwrap_or(top))).collect();
+    for m in &mut p.masters {
+        let a = anchors.iter().find(|(id, _)| *id == m.id).map(|x| x.1).unwrap_or(top);
+        let m = Arc::make_mut(m);
+        fix(&mut m.shapes, a);
+        for l in &mut m.layouts {
+            fix(&mut l.shapes, a);
+        }
+    }
+    let per_slide: Vec<_> =
+        p.slides.iter().map(|s| p.master_for(s).and_then(|(m, _)| anchors.iter().find(|(id, _)| *id == m.id)).map(|x| x.1).unwrap_or(top)).collect();
+    for (s, a) in p.slides.iter_mut().zip(per_slide) {
+        fix(&mut Arc::make_mut(s).shapes, a);
+    }
 }
 
 /// Placeholders read without a geometry (an empty custom geometry, see `shapes::sp`) take the

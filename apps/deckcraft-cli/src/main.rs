@@ -3,6 +3,7 @@
 //! ```text
 //! deckcraft-cli info FILE                       # slides, titles, layouts (JSON)
 //! deckcraft-cli render (FILE | --sample) [--slide N | --all] [--scale S] OUT.png|OUT_DIR
+//! N starts at 0. --all writes slide-01.png, slide-02.png, …
 //! deckcraft-cli render-transition FILE --slide N --t T[,T…] [--width PX] OUT.png   # transition frame(s)
 //! deckcraft-cli convert IN OUT                  # .deckcraft ⇄ .pptx, outline .txt, .png (first slide)
 //! deckcraft-cli run [--in FILE | --sample] [--cmd ID[=JSON]]... [--save OUT] [--export OUT] [--print]
@@ -36,6 +37,7 @@ macro_rules! outln {
 
 const USAGE: &str = "usage: deckcraft-cli info FILE
        deckcraft-cli render (FILE | --sample) [--slide N | --all] [--scale S] [--edit] OUT
+       N starts at 0 (the first slide). --all writes slide-01.png, slide-02.png, …
        deckcraft-cli render-transition FILE --slide N --t T[,T...] [--width PX] OUT.png
        deckcraft-cli convert IN OUT
        deckcraft-cli run [--in FILE | --sample] [--cmd ID[=JSON]]... [--save OUT] [--export OUT] [--print]
@@ -274,20 +276,43 @@ fn render(args: &[String]) -> Result<(), String> {
     open(&mut s, input.as_deref(), sample)?;
     let st = s.doc().map_err(|e| e.to_string())?;
     let n = st.doc.slides.len();
-    let list: Vec<usize> = if all { (0..n).collect() } else { vec![slide.unwrap_or(0)] };
+    let list = slide_indices(n, all, slide)?;
     if all {
         std::fs::create_dir_all(&out).map_err(|e| format!("{out}: {e}"))?;
     }
     for i in list {
-        if i >= n {
-            return Err(format!("no slide {i} (the deck has {n})"));
-        }
         let (png, w, h) = deckcraft_engine::cmd::file::render_png(&st.doc, i, scale, edit);
         let path = if all { format!("{out}/slide-{:02}.png", i + 1) } else { out.clone() };
         std::fs::write(&path, png).map_err(|e| format!("{path}: {e}"))?;
         outln!("{path} ({w}×{h})");
     }
     Ok(())
+}
+
+/// Slides `--slide` asks for. `N` is a 0-based index, the same one `slide.go` uses.
+/// `--all` still names files from 1 (`slide-01.png`), which is PowerPoint's slide number.
+fn slide_indices(n: usize, all: bool, slide: Option<usize>) -> Result<Vec<usize>, String> {
+    if all {
+        return Ok((0..n).collect());
+    }
+    let i = slide.unwrap_or(0);
+    if i >= n {
+        return Err(missing_slide(i, n));
+    }
+    Ok(vec![i])
+}
+
+fn missing_slide(i: usize, n: usize) -> String {
+    match n {
+        0 => format!("no slide index {i} (this deck has no slides)"),
+        1 => format!("no slide index {i} (this deck has 1 slide, index 0, which --all names slide-01.png)"),
+        n => {
+            let last = n - 1;
+            format!(
+                "no slide index {i} (this deck has {n} slides, numbered 0 through {last}; --all names them slide-01.png through slide-{n:02}.png)"
+            )
+        }
+    }
 }
 
 /// Frames of slide N's transition (0-based N; from slide N-1, or black for the first slide) at
@@ -326,6 +351,7 @@ fn render_transition(args: &[String]) -> Result<(), String> {
     if ts.is_empty() {
         return Err("render-transition needs --t".into());
     }
+    let paths = frame_paths(&out, &ts)?;
     let mut s = Session::new();
     open(&mut s, Some(&input), false)?;
     let st = s.doc().map_err(|e| e.to_string())?;
@@ -343,25 +369,36 @@ fn render_transition(args: &[String]) -> Result<(), String> {
         (prev.map(|p| render::render_slide(doc, p, &opts)), render::render_slide(doc, i, &opts), parts)
     });
     let aspect = sw / doc.slide_size.height.max(1.0);
-    for t in &ts {
+    for (t, path) in ts.iter().zip(&paths) {
         let img = match &cached {
             Some((old, new, parts)) => {
                 render::composite_transition(old.as_ref(), new, parts.as_ref(), &render::transition_frame(&tr.kind, &tr.option, *t, aspect))
             }
             None => render::render_transition(doc, i, *t, &opts),
         };
-        let path = if ts.len() == 1 {
-            out.clone()
-        } else {
-            let p = std::path::Path::new(&out);
-            let stem = p.file_stem().and_then(|x| x.to_str()).unwrap_or("frame");
-            let name = format!("{stem}-t{t:.3}.png");
-            p.with_file_name(name).to_string_lossy().into_owned()
-        };
-        std::fs::write(&path, img.to_png_at(render::dpi_for_scale(opts.scale))).map_err(|e| format!("{path}: {e}"))?;
+        std::fs::write(path, img.to_png_at(render::dpi_for_scale(opts.scale))).map_err(|e| format!("{path}: {e}"))?;
         outln!("{path} ({}×{}) {} {} t={t}", img.width, img.height, tr.kind, tr.option);
     }
     Ok(())
+}
+
+/// Output path of each frame. A single frame goes to OUT; several get `-t<value>` (three decimals)
+/// before the extension. Values that round to the same name would overwrite each other, so that is an error.
+fn frame_paths(out: &str, ts: &[f64]) -> Result<Vec<String>, String> {
+    if ts.len() == 1 {
+        return Ok(vec![out.to_string()]);
+    }
+    let p = std::path::Path::new(out);
+    let stem = p.file_stem().and_then(|x| x.to_str()).unwrap_or("frame");
+    let mut paths: Vec<String> = Vec::with_capacity(ts.len());
+    for t in ts {
+        let path = p.with_file_name(format!("{stem}-t{t:.3}.png")).to_string_lossy().into_owned();
+        if paths.contains(&path) {
+            return Err(format!("--t values round to the same three decimals: more than one frame would be written to {path}"));
+        }
+        paths.push(path);
+    }
+    Ok(paths)
 }
 
 fn convert(args: &[String]) -> Result<(), String> {
@@ -544,5 +581,47 @@ mod tests {
         assert!(run(&args(&["--help"])).is_ok());
         assert!(describe(Some("--help")).is_ok());
         assert!(mcp(&args(&["-h"])).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod slide_index_tests {
+    use super::{missing_slide, slide_indices};
+
+    #[test]
+    fn slide_numbers_start_at_zero_and_files_at_one() {
+        assert_eq!(slide_indices(8, false, None).ok().as_deref(), Some(&[0][..]));
+        assert_eq!(slide_indices(8, false, Some(0)).ok().as_deref(), Some(&[0][..]));
+        assert_eq!(slide_indices(8, false, Some(7)).ok().as_deref(), Some(&[7][..]));
+        assert_eq!(slide_indices(8, true, None).ok().as_deref(), Some(&[0, 1, 2, 3, 4, 5, 6, 7][..]));
+        let err = slide_indices(8, false, Some(8)).err().unwrap_or_default();
+        assert!(!err.is_empty(), "index 8 was accepted");
+        assert!(err.contains("numbered 0 through 7"), "{err}");
+        assert!(err.contains("slide-01.png"), "{err}");
+        assert!(err.contains("slide-08.png"), "{err}");
+        assert!(missing_slide(0, 0).contains("no slides"));
+        assert!(missing_slide(1, 1).contains("index 0"));
+    }
+}
+
+#[cfg(test)]
+mod frame_path_tests {
+    use super::frame_paths;
+
+    #[test]
+    fn single_frame_uses_out_as_is() {
+        assert_eq!(frame_paths("a/b.png", &[0.5]), Ok(vec!["a/b.png".to_string()]));
+    }
+
+    #[test]
+    fn frames_get_distinct_names() {
+        let paths = frame_paths("f.png", &[0.0, 0.25, 1.0]).unwrap_or_default();
+        assert_eq!(paths, ["f-t0.000.png", "f-t0.250.png", "f-t1.000.png"]);
+    }
+
+    #[test]
+    fn values_rounding_to_one_name_are_rejected() {
+        assert!(frame_paths("f.png", &[0.1001, 0.1002]).is_err());
+        assert!(frame_paths("f.png", &[0.5, 0.5]).is_err());
     }
 }

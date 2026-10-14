@@ -385,12 +385,32 @@ pub fn shape(w: &mut W, x: &mut Exp, o: &mut Out, cx: &mut Ctx, s: &Shape, depth
         }
         ShapeKind::Chart(c) => {
             let id = cx.id_for(s);
-            let rid = x.chart_rel(o, c);
+            // An unchanged Office 2016 chart goes back as itself, with a plain chart of the same
+            // data for readers without `cx1`, as PowerPoint writes it.
+            let ex = x.chartex_rel(o, c);
+            if let Some(exid) = &ex {
+                w.open("mc:AlternateContent", A::new().a("xmlns:mc", "http://schemas.openxmlformats.org/markup-compatibility/2006"));
+                w.open("mc:Choice", A::new().a("xmlns:cx1", "http://schemas.microsoft.com/office/drawing/2015/9/8/chartex").a("Requires", "cx1"));
+                frame_open(w, x, o, id, s);
+                w.open("a:graphicData", A::new().a("uri", super::chart::NS_CX));
+                w.empty("cx:chart", A::new().a("xmlns:cx", super::chart::NS_CX).a("r:id", exid));
+                w.close("a:graphicData");
+                frame_close(w);
+                w.close("mc:Choice");
+                w.open0("mc:Fallback");
+            }
+            let mut plain = (**c).clone();
+            plain.raw = plain.raw.filter(|r| !r.contains(super::chart::NS_CX));
+            let rid = x.chart_rel(o, &plain);
             frame_open(w, x, o, id, s);
             w.open("a:graphicData", A::new().a("uri", "http://schemas.openxmlformats.org/drawingml/2006/chart"));
             w.empty("c:chart", A::new().a("xmlns:c", crate::opc::NS_C).a("r:id", rid));
             w.close("a:graphicData");
             frame_close(w);
+            if ex.is_some() {
+                w.close("mc:Fallback");
+                w.close("mc:AlternateContent");
+            }
         }
         ShapeKind::Media(m) => {
             let id = cx.id_for(s);
@@ -626,7 +646,15 @@ fn sp(w: &mut W, x: &mut Exp, o: &mut Out, id: u32, s: &Shape, math: bool) {
         style(w, st);
     }
     if let Some(tb) = &s.text {
-        dml::text_body(w, x, o, "p:txBody", tb, math);
+        // A shape's text without its own anchor sits in the middle in the model; a file without
+        // one would put it at the top, so say so.
+        if s.ph.is_none() && !s.text_box && tb.body.anchor.is_none() {
+            let mut tb = tb.clone();
+            tb.body.anchor = Some(deckcraft_model::text::Anchor::Middle);
+            dml::text_body(w, x, o, "p:txBody", &tb, math);
+        } else {
+            dml::text_body(w, x, o, "p:txBody", tb, math);
+        }
     }
     w.close("p:sp");
 }

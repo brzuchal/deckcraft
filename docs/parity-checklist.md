@@ -1,6 +1,6 @@
 # PowerPoint feature checklist
 
-> **Generated:** 2026-10-10 (summary by `cargo xtask parity`; rows re-scored 2026-10-10 against PowerPoint for Mac 16.113.4) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Generated:** 2026-10-13 (summary by `cargo xtask parity`; Preview in editor re-scored; earlier rows re-scored 2026-10-10 against PowerPoint for Mac 16.113.4) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 The summary between `<!-- SUMMARY -->
 **Weighted breadth parity: 80%** over 191 features.
@@ -16,14 +16,18 @@ The summary between `<!-- SUMMARY -->
 | P2 | 54 | 14 | 15 | 25 | 40% |
 | P1 | 65 | 39 | 21 | 5 | 76% |
 | P2 | 54 | 14 | 17 | 23 | 42% |
+| P1 | 65 | 38 | 21 | 6 | 75% |
+| P2 | 54 | 13 | 16 | 25 | 39% |
 
 | Area | Parity |
 |---|---|
-| Application shell | 77% |
+| Application shell | 81% |
 | Files | 71% |
 | Slides | 90% |
 | Views | 93% |
 | Masters & themes | 85% |
+| Views | 90% |
+| Masters & themes | 88% |
 | Views | 90% |
 | Masters & themes | 88% |
 | Shapes | 88% |
@@ -32,6 +36,7 @@ The summary between `<!-- SUMMARY -->
 | Arrange | 100% |
 | Text | 80% |
 | Tables | 95% |
+| Tables | 92% |
 | Charts | 65% |
 | SmartArt | 33% |
 | Pictures | 52% |
@@ -41,9 +46,14 @@ The summary between `<!-- SUMMARY -->
 | Transitions | 100% |
 | Animations | 79% |
 | Slide show | 68% |
+| Transitions | 92% |
+| Animations | 85% |
+| Slide show | 66% |
 | Review | 60% |
 | Draw | 33% |
 | Undo & clipboard | 100% |
+| Draw | 50% |
+| Undo & clipboard | 88% |
 | Automation (✱) | 100% |
 | Platforms (✱) | 67% |
 
@@ -56,7 +66,7 @@ Open P0 items: Contextual tabs (Shape Format, Picture Format, Table Design/Layou
 | Application shell | Start screen (new, templates/themes, recent) | P0 | D |
 | Application shell | Ribbon with Home/Insert/Draw/Design/Transitions/Animations/Slide Show/Review/View tabs | P0 | D |
 | Application shell | Contextual tabs (Shape Format, Picture Format, Table Design/Layout, Chart Design) | P0 | P |
-| Application shell | Quick Access toolbar / title bar commands | P1 | P |
+| Application shell | Quick Access toolbar / title bar commands | P1 | D |
 | Application shell | Native menu bar (macOS) with every command | P1 | M |
 | Application shell | Command palette / Tell me search | P1 | D |
 | Application shell | Keyboard shortcuts for every common command | P0 | D |
@@ -105,7 +115,7 @@ Open P0 items: Contextual tabs (Shape Format, Picture Format, Table Design/Layou
 | Masters & themes | Insert/rename/delete layouts, insert placeholders | P1 | D |
 | Masters & themes | Handout and Notes masters | P2 | M |
 | Masters & themes | Built-in themes (original designs) | P0 | D |
-| Masters & themes | Theme variants | P1 | P |
+| Masters & themes | Theme variants | P1 | D |
 | Masters & themes | Colour schemes (built-in and custom) | P0 | D |
 | Masters & themes | Font schemes (built-in and custom) | P0 | D |
 | Masters & themes | Effect schemes / background styles | P2 | P |
@@ -167,7 +177,7 @@ Open P0 items: Contextual tabs (Shape Format, Picture Format, Table Design/Layou
 | Text | Find and replace, replace fonts | P1 | P |
 | Text | Spelling check | P1 | P |
 | Text | Thesaurus | P2 | M |
-| Text | AutoCorrect and smart quotes | P2 | M |
+| Text | AutoCorrect and smart quotes | P2 | Y |
 | Text | Symbols and emoji | P1 | D |
 | Text | Equations | P2 | M |
 | Text | Hyperlinks (URL, slide, email) | P1 | D |
@@ -175,7 +185,7 @@ Open P0 items: Contextual tabs (Shape Format, Picture Format, Table Design/Layou
 | Text | Right-to-left and complex scripts | P1 | P |
 | Text | East Asian text (CJK fonts, line breaking) | P1 | P |
 | Tables | Insert table (grid picker, dialog) | P0 | D |
-| Tables | Draw table | P2 | M |
+| Tables | Draw table | P2 | P |
 | Tables | Table styles and style options | P0 | D |
 | Tables | Insert/delete rows and columns | P0 | D |
 | Tables | Merge and split cells | P1 | D |
@@ -221,7 +231,7 @@ Open P0 items: Contextual tabs (Shape Format, Picture Format, Table Design/Layou
 | Animations | By-paragraph text builds | P1 | D |
 | Animations | Triggers | P2 | D |
 | Animations | Animation Painter | P2 | D |
-| Animations | Preview in editor | P1 | P |
+| Animations | Preview in editor | P1 | D |
 | Slide show | Full-screen show from start / current | P0 | D |
 | Slide show | Navigation (keys, click, go to slide, blank screen) | P0 | D |
 | Slide show | Presenter view (notes, next slide, timer) | P0 | P |
@@ -237,7 +247,7 @@ Open P0 items: Contextual tabs (Shape Format, Picture Format, Table Design/Layou
 | Review | Compare presentations | P2 | M |
 | Review | Track changes / version history | P2 | M |
 | Draw | Ink pens, highlighter, eraser | P1 | P |
-| Draw | Ink to shape / text | P2 | M |
+| Draw | Ink to shape / text | P2 | P |
 | Undo & clipboard | Unlimited undo/redo | P0 | D |
 | Undo & clipboard | Cut, copy, paste shapes and slides | P0 | D |
 | Undo & clipboard | Paste special (keep formatting, picture, text only) | P1 | D |

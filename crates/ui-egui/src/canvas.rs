@@ -35,6 +35,33 @@ fn mods(ui: &Ui) -> Mods {
     ui.input(|i| Mods { shift: i.modifiers.shift, alt: i.modifiers.alt, cmd: i.modifiers.command || i.modifiers.ctrl })
 }
 
+/// A two-finger twist on the trackpad. macOS delivers it as [`egui::Event::Rotate`];
+/// other platforms leave the delta at zero.
+///
+/// The selected shapes turn with the fingers. The whole twist is one undo step. Pinch-zoom
+/// and two-finger scrolling are left as they are.
+pub(crate) fn trackpad_twist(app: &mut SlideApp, ctx: &egui::Context) {
+    let delta = ctx.input(|i| i.rotation_delta());
+    let delta = if delta.is_finite() { delta.clamp(-std::f32::consts::PI, std::f32::consts::PI) } else { 0.0 };
+    let turning = delta.abs() > 1e-4;
+    let blocked = app.show.is_some()
+        || app.backstage_open()
+        || app.dialog.as_ref().is_some_and(|d| d.modal())
+        || app.palette.is_some()
+        || app.session.tool.dragging();
+    let over = app.canvas_rect.is_some_and(|r| ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| r.contains(p)));
+    let rotatable = app.session.active().is_some_and(|d| {
+        d.selection.text.is_none() && d.selection.shapes.iter().any(|id| d.shape(*id).is_some_and(|sh| !sh.locked && sh.xfrm.is_some()))
+    });
+    if !blocked && turning && rotatable && (app.twisting || over) {
+        let _ = app.run("shape.rotate", json!({"by": f64::from(delta.to_degrees()), "gesture": "move"}));
+        app.twisting = true;
+    } else if app.twisting {
+        let _ = app.run("shape.rotate", json!({"gesture": "end", "ids": []}));
+        app.twisting = false;
+    }
+}
+
 /// The slide's rect on screen for the current zoom.
 pub fn layout(app: &SlideApp, avail: Rect) -> (Rect, f32) {
     let Some(d) = app.session.active() else { return (avail, 1.0) };
@@ -44,7 +71,8 @@ pub fn layout(app: &SlideApp, avail: Rect) -> (Rect, f32) {
     let (sw, sh) = (side(page.width), side(page.height));
     let margin = 28.0;
     let fit = ((avail.width() - margin * 2.0) / sw).min((avail.height() - margin * 2.0) / sh).max(0.05);
-    let scale = app.ui.zoom.unwrap_or(fit);
+    // A zoom from outside the editor's own controls (settings, the control protocol) is kept in range.
+    let scale = app.ui.zoom.filter(|z| z.is_finite() && *z > 0.0).map_or(fit, |z| z.clamp(*crate::ZOOM_RANGE.start(), *crate::ZOOM_RANGE.end()));
     let size = vec2(sw * scale, sh * scale);
     let mut r = Rect::from_center_size(avail.center(), size);
     if size.x > avail.width() {
@@ -54,6 +82,17 @@ pub fn layout(app: &SlideApp, avail: Rect) -> (Rect, f32) {
         r = Rect::from_min_size(pos2(r.min.x, avail.min.y + margin), size);
     }
     (r, scale)
+}
+
+/// A trackpad flick or mouse-wheel notch that should turn the page.
+///
+/// The stronger axis wins, so a sideways swipe is not read as a vertical scroll. Negative
+/// movement — the content moves left or up, which is a swipe left or up with natural scrolling —
+/// is the next slide. A nudge under 18 points is ignored so a resting finger does not change slides.
+pub(crate) fn page_flick(wheel: egui::Vec2) -> Option<bool> {
+    const MIN_FLICK: f32 = 18.0;
+    let along = if wheel.x.abs() > wheel.y.abs() { wheel.x } else { wheel.y };
+    (along.abs() > MIN_FLICK).then_some(along < 0.0)
 }
 
 pub fn show(app: &mut SlideApp, ui: &mut Ui) {
@@ -95,15 +134,20 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
     if resp.hovered() && !zooming {
         if overflow != egui::Vec2::ZERO {
             offset -= wheel;
-        } else if wheel.y.abs() > 18.0 && app.session.tool.marquee.is_none() && !app.session.tool.dragging() {
-            // Wheel over a fitted slide pages through slides (like PowerPoint).
-            let id = if wheel.y < 0.0 { "slide.next" } else { "slide.previous" };
+        } else if !app.anim_preview_active()
+            && app.session.tool.marquee.is_none()
+            && !app.session.tool.dragging()
+            && let Some(next) = page_flick(wheel)
+        {
+            // A fitted slide: the mouse wheel and a trackpad swipe turn the page. Pinch zoom is
+            // the branch above and is left alone.
             let gate = ui.id().with("wheel_gate");
-            let last: f64 = ui.data_mut(|d| d.get_temp(gate).unwrap_or(0.0));
+            // No previous flick yet: the first one must turn the page, not wait out the gap.
+            let last: f64 = ui.data_mut(|d| d.get_temp(gate).unwrap_or(f64::NEG_INFINITY));
             let now = ui.input(|i| i.time);
             if now - last > 0.35 {
                 ui.data_mut(|d| d.insert_temp(gate, now));
-                let _ = app.run(id, json!({}));
+                let _ = app.run(if next { "slide.next" } else { "slide.previous" }, json!({}));
             }
         }
     }
@@ -129,6 +173,7 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
     };
     crate::media::gif_repaint(ui.ctx(), &gifs);
     let times: Vec<_> = gifs.iter().map(|g| (g.id, g.t)).collect();
+    let anim = app.anim_preview_draw();
     let st = app.session.active();
     // One texture pixel in screen points, and the canvas in pixels from the slide's corner.
     let pixel = vec2(slide_rect.width() / px.0 as f32, slide_rect.height() / px.1 as f32);
@@ -137,7 +182,8 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
         Some((Target::Slides, d)) => {
             let idx = d.selection.slide;
             let doc = d.doc.clone();
-            app.textures.slide(ui.ctx(), &doc, idx, px, visible, true, crate::media::gif_key(&gifs), app.ui.grayscale, &times)
+            let frame = anim.as_ref().map(|(tl, t)| (tl, *t));
+            app.textures.slide(ui.ctx(), &doc, idx, px, visible, true, crate::media::gif_key(&gifs), app.ui.grayscale, &times, frame)
         }
         Some((Target::Master { master }, d)) => master_tex(ui.ctx(), &d.doc, master, None, px, visible),
         Some((Target::Layout { master, layout }, d)) => master_tex(ui.ctx(), &d.doc, master, Some(layout), px, visible),
@@ -223,11 +269,19 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
         ruler(&painter, avail, slide_rect, scale, &t);
     }
     pointer(app, ui, &resp, xf);
-    overlays(app, ui, &painter, xf, &t);
-    ime_output(app, ui, xf);
-    media_bar(app, ui, xf);
-    gif_buttons(app, ui, xf, &gifs);
-    context_menu(app, &resp);
+    if !app.anim_preview_active() {
+        overlays(app, ui, &painter, xf, &t);
+        ime_output(app, ui, xf);
+        media_bar(app, ui, xf);
+        gif_buttons(app, ui, xf, &gifs);
+        if resp.secondary_clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let word = app.session.active().and_then(|st| app.squiggles.word_at(st, xf.to_slide(p), 4.0 / xf.scale.max(0.01) as f64));
+            app.squiggles.menu_word = word;
+        }
+        context_menu(app, &resp);
+    }
 }
 
 /// The canvas `avail` in texture pixels (`pixel`: one pixel's size in points) from the slide's
@@ -374,14 +428,18 @@ fn master_tex(
     visible: deckcraft_render::Region,
 ) -> Option<(egui::TextureHandle, deckcraft_render::Region)> {
     let scale = px.0 as f64 / doc.slide_size.width.max(1.0);
-    let region = deckcraft_render::pasteboard_region(px, scale, deckcraft_render::layout_extent(doc, master, layout), visible);
+    let region = crate::textures::fit_texture(
+        deckcraft_render::pasteboard_region(px, scale, deckcraft_render::layout_extent(doc, master, layout), visible),
+        visible,
+        crate::textures::max_side(ctx),
+    );
     let img = deckcraft_render::render_layout(
         doc,
         master,
         layout,
         &deckcraft_render::RenderOpts { scale, edit: true, offset: region.offset(), size: Some(region.size()), ..Default::default() },
     );
-    Some((ctx.load_texture("master-canvas", crate::textures::to_color_image(&img, false), egui::TextureOptions::LINEAR), region))
+    Some((crate::textures::upload(ctx, "master-canvas", crate::textures::to_color_image(&img, false)), region))
 }
 
 fn ruler(p: &egui::Painter, avail: Rect, slide: Rect, scale: f32, t: &Tokens) {
@@ -430,6 +488,14 @@ fn ruler(p: &egui::Painter, avail: Rect, slide: Rect, scale: f32, t: &Tokens) {
 fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf) {
     if crate::eyedropper::canvas(app, ui, resp, xf) {
         return;
+    }
+    if app.anim_preview_active() {
+        // A click on the slide ends the preview, then selects as usual.
+        if resp.hovered() && ui.input(|i| i.pointer.primary_pressed()) {
+            app.stop_anim_preview();
+        } else {
+            return;
+        }
     }
     let tol = (4.0 / xf.scale) as f64;
     let m = mods(ui);
@@ -498,6 +564,14 @@ fn poly(p: &egui::Painter, pts: [Pos2; 4], stroke: Stroke) {
 }
 
 fn overlays(app: &mut SlideApp, ui: &Ui, painter: &egui::Painter, xf: Xf, t: &Tokens) {
+    // Spelling squiggles under misspelt words (checked in the background).
+    if let Some(st) = app.session.active() {
+        let lines = app.squiggles.update(st, Some(ui.ctx()));
+        let scale = (xf.to_screen(Point::new(1.0, 0.0)) - xf.to_screen(Point::new(0.0, 0.0))).length();
+        for (a, b) in lines {
+            crate::squiggles::paint(painter, xf.to_screen(a), xf.to_screen(b), scale);
+        }
+    }
     let Some(st) = app.session.active() else { return };
     let sel_stroke = Stroke::new(1.0, t.selection);
     let editing = st.selection.text.clone();
@@ -716,6 +790,16 @@ fn draw_preview(app: &SlideApp, p: &egui::Painter, xf: Xf, x: Xfrm, t: &Tokens) 
         ToolKind::Shape { preset } => preset.clone(),
         _ => "rect".into(),
     };
+    if preset == deckcraft_engine::tools::DRAW_TABLE {
+        // A border inside a table (flat), or the outline of a new table.
+        let (a, b) = (xf.to_screen(Point::new(x.x, x.y)), xf.to_screen(Point::new(x.x + x.w, x.y + x.h)));
+        if x.w < 0.5 || x.h < 0.5 {
+            p.line_segment([a, b], Stroke::new(1.5, t.accent));
+        } else {
+            p.rect_stroke(Rect::from_two_pos(a, b), 0.0, Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
+        }
+        return;
+    }
     if deckcraft_geom::preset::is_line_like(&preset) {
         let a = x.affine();
         p.line_segment([xf.to_screen(a * Point::new(0.0, 0.0)), xf.to_screen(a * Point::new(x.w, x.h))], Stroke::new(1.5, t.accent));
@@ -758,6 +842,76 @@ fn context_menu(app: &mut SlideApp, resp: &egui::Response) {
                 ui.close();
             }
             return;
+        }
+        // A misspelt word under the pointer: its suggestions, then Ignore All and Add to Dictionary.
+        if let Some(w) = app.squiggles.menu_word.clone() {
+            if let Some(from) = w.delete_from {
+                if ui.button(egui::RichText::new("Delete Repeated Word").strong()).clicked() {
+                    let cut: String = format!("{}{}", " ".repeat(w.start - from), w.word);
+                    // The gap is spaces; take it from the text so tabs or no-break spaces match.
+                    let gap = app
+                        .session
+                        .active()
+                        .and_then(|st| match w.tag {
+                            crate::squiggles::Tag::Shape { id, para } => st.shape(id)?.text.as_ref()?.paragraphs.get(para).map(|p| p.text()),
+                            crate::squiggles::Tag::Cell { id, row, col, para } => match &st.shape(id)?.kind {
+                                deckcraft_model::ShapeKind::Table(tb) => tb.cell(row, col)?.text.paragraphs.get(para).map(|p| p.text()),
+                                _ => None,
+                            },
+                            crate::squiggles::Tag::Notes { .. } => None,
+                        })
+                        .map(|t| t.chars().skip(from).take(w.start + w.word.chars().count() - from).collect::<String>())
+                        .unwrap_or(cut);
+                    let mut p = json!({"para": 0, "start": from, "word": gap, "to": ""});
+                    if let Some(o) = p.as_object_mut() {
+                        match w.tag {
+                            crate::squiggles::Tag::Shape { id, para } => {
+                                o.insert("shape".into(), json!(id));
+                                o.insert("para".into(), json!(para));
+                            }
+                            crate::squiggles::Tag::Cell { id, row, col, para } => {
+                                o.insert("shape".into(), json!(id));
+                                o.insert("row".into(), json!(row));
+                                o.insert("col".into(), json!(col));
+                                o.insert("para".into(), json!(para));
+                            }
+                            crate::squiggles::Tag::Notes { .. } => {}
+                        }
+                    }
+                    let _ = app.run("review.spellingChange", p);
+                    app.squiggles.menu_word = None;
+                    ui.close();
+                }
+            } else if w.suggestions.is_empty() {
+                ui.label(egui::RichText::new("(no spelling suggestions)").weak());
+            }
+            for to in &w.suggestions {
+                if ui.button(egui::RichText::new(to).strong()).clicked() {
+                    let p = match w.tag {
+                        crate::squiggles::Tag::Shape { id, para } => json!({"shape": id, "para": para, "start": w.start, "word": w.word, "to": to}),
+                        crate::squiggles::Tag::Cell { id, row, col, para } => {
+                            json!({"shape": id, "row": row, "col": col, "para": para, "start": w.start, "word": w.word, "to": to})
+                        }
+                        crate::squiggles::Tag::Notes { .. } => json!({}),
+                    };
+                    let _ = app.run("review.spellingChange", p);
+                    app.squiggles.menu_word = None;
+                    ui.close();
+                }
+            }
+            if ui.button("Ignore All").clicked() {
+                app.squiggles.ignore(&w.word);
+                app.squiggles.menu_word = None;
+                ui.close();
+            }
+            if ui.button("Add to Dictionary").clicked() {
+                if let Err(e) = app.session.execute("review.addToDictionary", &json!({"word": w.word})) {
+                    app.set_status(e.to_string());
+                }
+                app.squiggles.menu_word = None;
+                ui.close();
+            }
+            ui.separator();
         }
         let has_sel = app.session.active().is_some_and(|d| !d.selection.shapes.is_empty());
         for (l, id) in [("Cut", "edit.cut"), ("Copy", "edit.copy"), ("Paste", "edit.paste")] {

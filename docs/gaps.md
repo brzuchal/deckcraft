@@ -24,6 +24,10 @@
 > **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** trivial (command palette no longer offers Export without a path, #79; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 > **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** minor (Design ▸ Effects; checklist row stays P so breadth stays 79%; previous: 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 > **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** minor (Slide Master Preserve and Title/Footers placeholders; checklist letters unchanged, breadth stays 79%, dialogs stay 27; previous: 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** minor (chart trendlines are drawn; previous: minor, chart trendlines round-trip; 3-D bevel, camera and face lighting rendered; IME composition and CJK interface text landed, #101; core-workflow alpha gate added; stage stays alpha; full re-measure against PowerPoint for Mac 16.113.4 and the open GitHub issues) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (animation preview plays on the editor canvas; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** minor (a two-finger twist rotates the selection; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** minor (a trackpad swipe turns the page in the editor and the show; pinch-zoom remains; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every known shortfall, one entry each, ranked by how much it stops someone who presents with
 PowerPoint from switching. This is the work list: pick from the top. Numbers are summarized in
@@ -52,6 +56,7 @@ revision history.
 | 8 | Image paste fails on Windows and Linux (#53) | Feature | B | 2–4 | [ui-parity.md](ui-parity.md) |
 | 9 | Presenter view isn't placed on the second display | Hardware | B | 3–5 | [slideshow-parity.md](slideshow-parity.md) |
 | 10 | Animation Pane: thin preview (timeline done); 64 of ~190 effects | Feature | B (pane) | 8–14 | [animation-parity.md](animation-parity.md) |
+| 10 | Animation Pane: no timeline; preview is the whole slide, not from the selected effect; 64 of ~190 effects | Feature | B (pane) | 10–16 | [animation-parity.md](animation-parity.md) |
 | 11 | Charts: data grid editing, elements, `chartex` types | Feature | B (data, elements) | 12–20 | [parity-checklist.md](parity-checklist.md) |
 | 12 | Format Shape pane thinner than PowerPoint's | UI/UX | B | 6–10 | [ui-parity.md](ui-parity.md) |
 | 13 | No native macOS menu bar | UI/UX | B | 3–5 | [ui-parity.md](ui-parity.md) |
@@ -152,8 +157,8 @@ Detail in [file-format-parity.md](file-format-parity.md).
 ### SVG pictures don't render
 - **Evidence:** `crates/render/src/images.rs` decodes through `image` 0.25 (PNG, JPEG, WebP, GIF,
   TIFF, BMP), and EMF/WMF through `deckcraft-metafile` (ported from WordCraft: paths, fills, pens,
-  pattern and hatch brushes, bitmaps and text; rectangle clip regions are applied, EMF+ records are
-  not drawn).
+  pattern and hatch brushes, bitmaps and text; rectangle clip regions are applied, EMF+ only
+  pictures play their EMF+ records).
   Nothing reads SVG; PowerPoint's Insert Icons stores SVG with a PNG fallback.
 - **Impact:** SVG icons show only their raster fallback, and SVG files can't be inserted.
 - **Estimate:** 4–8 h (an SVG renderer through `resvg`-style crates).
@@ -219,10 +224,20 @@ Detail in [file-format-parity.md](file-format-parity.md).
 
 ### Charts: data grid, elements and the newer chart types
 - **Evidence:** checklist rows "Edit chart data" (P0, partial), "Chart elements" (partial), "Other
-  chart types" (partial); `chartex` parts (waterfall, funnel, treemap, sunburst, histogram, box &
-  whisker) aren't read. Trendlines round-trip (`corpus_charts.rs`) and are not drawn. A combo
-  chart's secondary value axis is read (`y2_*`, `Series.secondary_axis`) and is not written back
-  when the chart is rebuilt.
+  chart types" (partial); `chartex` parts (waterfall, funnel, treemap, sunburst, histogram, Pareto,
+  box & whisker) are read, drawn, inserted, edited and saved as `chartEx` (kept unchanged, else
+  written from the model, with a plain chart fallback). Waterfalls float and total, funnels,
+  treemaps (squarified, nested by level with group banners) and sunbursts (one ring per level)
+  have their own layouts, histograms and Paretos bin their data (count, width or Scott's rule),
+  and box & whisker charts use exclusive or inclusive quartiles with 1.5 IQR whiskers. Region maps are kept
+  (their cached geography too, also through edits) and drawn as value-coloured tiles with a
+  colour scale, since DeckCraft ships no map boundaries. Radar charts are drawn polar (filled
+  or lines), stock charts as high-low lines with close dashes or up/down bars and saved as
+  `c:stockChart`, and combo charts start as columns with a line. Trendlines round-trip
+  (`corpus_charts.rs`) and are drawn: linear, exponential, logarithmic, polynomial, power and
+  moving average, with forecast and the equation and R² label. A moving average is drawn with
+  neither label. A combo chart's secondary value axis is read (`y2_*`,
+  `Series.secondary_axis`) and is not written back when the chart is rebuilt.
 - **Impact:** most business decks have charts; editing their data is routine.
 - **Estimate:** 12–20 h. Data and elements are **beta blockers** (6–10 h).
 
@@ -241,7 +256,10 @@ Detail in [file-format-parity.md](file-format-parity.md).
 - **Estimate:** 6–10 h.
 
 ### Animation Pane, effect count and preview
-Detail in [animation-parity.md](animation-parity.md). 10–16 h; the pane is a **beta blocker**.
+Animations ▸ Preview and the pane's Play All play the current slide's animations on the editor
+canvas (Escape or a click stops them). Still open: the advanced timeline, starting from the
+selected effect, and most of the effect gallery. Detail in
+[animation-parity.md](animation-parity.md). 10–16 h; the pane's timeline is a **beta blocker**.
 
 ### Interactive decks: media-action links, audio-triggered effects and click boxes
 - **Evidence:** the slide show plays click-triggered animations, keeps each slide's state across
@@ -293,8 +311,22 @@ Detail in [animation-parity.md](animation-parity.md). 10–16 h; the pane is a *
 
 ### Proofing: spelling, thesaurus, AutoCorrect
 - **Evidence:** `review.spelling` checks a small built-in list of frequent misspellings
-  (`crates/engine/src/cmd/review.rs`); no dictionaries, no thesaurus, no AutoCorrect.
+  (`crates/engine/src/cmd/review.rs`); no dictionaries, no thesaurus. AutoCorrect has PowerPoint's options (two initial capitals,
+  sentence and day capitals, caps lock, fractions, an editable replace list); no AutoFormat of
+  ordinals or automatic bulleted lists, no undo of a single correction.
 - **Estimate:** 8–14 h (Hunspell-format dictionaries under an open licence per language).
+- **Evidence:** `review.spelling` checks with Hunspell-format dictionaries the system already has
+  (`crates/engine/src/spell.rs`: affixes, cross products, one level of continuation, compounds,
+  case rules, suggestions), each run in its own language (`lang` from PPTX), with a user dictionary
+  for Add to Dictionary. Red squiggles on the current slide come from a worker thread, with a
+  context menu to correct, ignore or add; table cells and speaker notes are squiggled too, each
+  with a right-click menu; repeated words (`the the`) are flagged with Delete Repeated Word;
+  Review › Language marks the selection's proofing language or Do Not Check Spelling
+  (`lang`/`noProof` round-trip in PPTX). No grammar checking. The web build checks on the UI thread a few milliseconds per
+  frame. None ship with DeckCraft, so without one installed (always on Windows and the web) only a
+  short list of common misspellings is found.
+  Thesaurus (#549) and AutoCorrect (#521) have open PRs.
+- **Estimate:** 1–2 h (bundle openly licensed dictionaries).
 
 ### Equations
 - **Evidence:** checklist row missing; PR #55 (OMML editor, +10.5k lines) is open.
@@ -355,7 +387,9 @@ Detail in [hardware-parity.md](hardware-parity.md).
   or wgpu path).
 - **Software-only video decode**; PowerPoint uses VideoToolbox/Media Foundation. 8–14 h (copy
   FilmCraft's hardware decode).
-- **No pen pressure or tilt for ink**; no pinch-zoom or trackpad gestures. 3–6 h.
+- **No pen pressure or tilt for ink**; no pinch-zoom (it does not keep the point under the pointer). A two-finger twist does rotate the selected shapes. 3–6 h.
+- **No pen pressure or tilt for ink**; no pinch-zoom. A trackpad swipe turns the page when the
+  slide fits the window, and during the show. 2–4 h for pinch-zoom.
 
 ## Localization
 
@@ -409,6 +443,8 @@ Detail in [localization-parity.md](localization-parity.md).
 | 2026-10-13 | minor | Benchmark suite (`cargo xtask bench`, `deckcraft-cli bench`): the performance gap is now frame rate and a PowerPoint comparison |
 | 2026-10-14 | minor | Owned corpus `corpus_media.rs`: 3-D model parts and animation bounce end now round-trip. The real-deck corpus and #70/#74/#77 stay open |
 | 2026-10-14 | trivial | Corpus slice: themes, masters, effects and links; text Mouse Over actions round-trip |
+| 2026-10-14 | trivial | A moving average trendline is drawn without an equation or an R² label |
+| 2026-10-14 | minor | Chart trendlines are drawn (six types, forecast, equation and R²). The charts gap stays open for the data grid, chartex and secondary-axis export; the real-deck corpus gap stays open |
 | 2026-10-14 | minor | Chart trendlines round-trip. The real-deck corpus gap stays open; secondary-axis export and drawing trendlines stay in the charts gap |
 | 2026-10-14 | trivial | 3-D contours |
 | 2026-10-14 | trivial | 3-D light rigs and materials; extrusion sides lit per side |
@@ -434,6 +470,14 @@ Detail in [localization-parity.md](localization-parity.md).
 | 2026-10-13 | trivial | Command palette skips commands that need a value, so Export opens the dialog (#79) |
 | 2026-10-14 | minor | Design ▸ Effects applies a named effect scheme. The checklist row stays P, so breadth stays 79%. Dialogs stay 27 |
 | 2026-10-14 | minor | Slide Master Preserve and Title/Footers placeholders. Checklist letters unchanged (breadth stays 79%); dialogs stay 27 |
+| 2026-10-13 | minor | AutoCorrect options: case rules, fractions, ellipsis, a larger built-in list and your own entries (`text.autocorrect`, Tools ▸ AutoCorrect) |
+| 2026-10-14 | trivial | Notes spelling menu, Review › Language with Do Not Check Spelling, repeated words |
+| 2026-10-14 | trivial | Spelling squiggles in table cells and notes, and on the web |
+| 2026-10-14 | minor | Spelling squiggles while typing, Add to Dictionary, per-run languages and compounds |
+| 2026-10-14 | minor | Spelling checks with installed Hunspell dictionaries and suggests corrections |
+| 2026-10-13 | minor | Animation preview plays the current slide on the editor canvas; the pane gap keeps the timeline, preview from the selected effect, and the remaining effects |
+| 2026-10-14 | minor | A two-finger twist rotates the selected shapes. Pinch-zoom is still open |
+| 2026-10-14 | minor | A trackpad swipe (and the mouse wheel, in the show) turns the page. Pinch-zoom remains |
 | 2026-10-13 | minor | Shape, picture and table rendering checked against PowerPoint on ~150 synthetic edge-case slides; 3-D bevels, cameras and face lighting now render approximately (gap narrowed to extrusion, rigs and the 3-D pane) |
 | 2026-10-13 | minor | Interactive decks: triggers, return-to-slide state and click rules landed in the slide show; the remaining pieces are one new entry under Features |
 | 2026-10-12 | minor | IME composition in slide text and notes, and CJK interface text with real glyphs (#101): the IME gap is now Korean on the web and table-cell underlines |
