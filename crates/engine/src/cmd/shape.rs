@@ -2,7 +2,7 @@
 //! names and alt text.
 
 use deckcraft_color::{ColorTransform, Rgba, SchemeSlot};
-use deckcraft_model::style::{Dash, Glow, Gradient, GradientShape, GradientStop, LineEnd, PatternFill, PictureFill, Reflection, Shadow};
+use deckcraft_model::style::{Dash, Glow, Gradient, GradientShape, GradientStop, LineEnd, PatternFill, PictureFill, PictureMode, Reflection, Shadow};
 use deckcraft_model::{ColorRef, Effects, Fill, Geom, Line, ShapeStyle};
 use serde_json::{Value, json};
 
@@ -39,8 +39,16 @@ pub fn specs() -> Vec<CommandSpec> {
             ink_to_shape
         ),
         cmd!(query "shape.sites", "Connection Sites", [], None, "{id} → [[x, y]] connection sites in slide points", has_slide, sites),
-        cmd!("shape.move", "Move", [], None, "{dx?, dy?: pt (relative) | x?, y?: pt (absolute), ids?}", has_selection, move_by),
-        cmd!("shape.resize", "Size", ["Shape Format", "Size"], None, "{w?, h?: pt, lockAspect?: bool, ids?}", has_selection, resize),
+        cmd!(
+            "shape.move",
+            "Move",
+            [],
+            None,
+            "{dx?: pt (relative), dy?: pt (relative), ids?} | {x?: pt (absolute), y?: pt (absolute), ids?}",
+            has_selection,
+            move_by
+        ),
+        cmd!("shape.resize", "Size", ["Shape Format", "Size"], None, "{w?: pt, h?: pt, lockAspect?: bool, ids?}", has_selection, resize),
         cmd!("shape.setBounds", "Position and Size", [], None, "{x, y, w, h, ids?}", has_selection, set_bounds),
         cmd!(
             "shape.rotate",
@@ -64,11 +72,20 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("shape.adjust", "Adjust Shape", [], None, "{index, value (file units), ids?}", has_selection, adjust),
         cmd!("shape.change", "Change Shape", ["Shape Format", "Insert Shapes", "Edit Shape"], None, "{preset, ids?}", has_selection, change),
         cmd!(
+            "shape.smoothCorners",
+            "Smooth Corners",
+            ["Shape Format", "Insert Shapes", "Edit Shape"],
+            None,
+            "{smoothing: 0..100 (%), radius?: pt (default: the rounded rectangle's own), ids?} → rectangle outline with smoothed (squircle) corners",
+            has_selection,
+            smooth_corners
+        ),
+        cmd!(
             "shape.fill",
             "Shape Fill",
             ["Shape Format", "Shape Styles"],
             None,
-            "{color? | none?: true | gradient?: {stops: [[pos, color]], angle?, kind?: linear|radial} | picture?: base64 | pattern?: {preset, fg, bg} | transparency?: 0..1 | reset?: true, ids?}",
+            "{color? | none?: true | gradient?: {stops: [[pos, color]], angle?, kind?: linear|radial} | picture?: base64 | pattern?: {preset, fg, bg} | transparency?: 0..1 | reset?: true, ids?}; pictureProps?: {tile?: bool, offsetX?, offsetY?: pt, scaleX?, scaleY?: 0..10, align?: tl|t|tr|l|ctr|r|bl|b|br, mirror?: none|x|y|xy, stretch?: [l, t, r, b] fractions, rotateWithShape?: bool} adjusts a picture fill",
             has_selection,
             fill
         ),
@@ -86,7 +103,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Shape Effects",
             ["Shape Format", "Shape Styles"],
             None,
-            "{shadow?: none|outer|inner|perspective|{color, blur, dist, dir}, glow?: none|{color, radius}, softEdges?: pt, reflection?: none|tight|half|full, bevel?: none|circle|…, shadowProps?: {color?, transparency?: 0..1, blur?: pt, dist?: pt, dir?: deg}, glowProps?: {color?, transparency?, radius?: pt}, reflectionProps?: {transparency?, size?: 0..1, dist?: pt, blur?: pt}, reset?, ids?} (the *Props keys adjust the current effect, adding a default one when there is none)",
+            "{shadow?: none|outer|inner|perspective|{color, blur, dist, dir}, glow?: none|{color, radius}, softEdges?: pt, reflection?: none|tight|half|full, bevel?: none|circle|…, threeD?: {camera?: preset, rotX?, rotY?, rotZ?: deg, z?: pt, bevelTop?, bevelBottom?: none|circle|…, bevelTopW?, bevelTopH?, bevelBottomW?, bevelBottomH?, depth?, contour?: pt, material?, lighting?, reset?: true}, shadowProps?: {color?, transparency?: 0..1, blur?: pt, dist?: pt, dir?: deg}, glowProps?: {color?, transparency?, radius?: pt}, reflectionProps?: {transparency?, size?: 0..1, dist?: pt, blur?: pt}, reset?, ids?} (the *Props keys adjust the current effect, adding a default one when there is none)",
             has_selection,
             effects
         ),
@@ -112,7 +129,15 @@ pub fn specs() -> Vec<CommandSpec> {
             lock
         ),
         cmd!("shape.setDefault", "Set as Default Shape", [], None, "{}", has_selection, set_default),
-        cmd!("picture.crop", "Crop", ["Picture Format", "Size"], None, "{left?, top?, right?, bottom?: fraction 0..1, ids?}", has_selection, crop),
+        cmd!(
+            "picture.crop",
+            "Crop",
+            ["Picture Format", "Size"],
+            None,
+            "{left?: fraction 0..1, top?: fraction 0..1, right?: fraction 0..1, bottom?: fraction 0..1, ids?}",
+            has_selection,
+            crop
+        ),
         cmd!(
             "picture.adjust",
             "Corrections",
@@ -404,6 +429,47 @@ fn adjust(s: &mut Session, p: &Value) -> Result<Value> {
     })
 }
 
+/// Rectangles and rounded rectangles become custom geometry whose corners are smoothed
+/// ([`deckcraft_geom::squircle`]); the radius is the rounded rectangle's own unless `radius` says.
+fn smooth_corners(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "shape.smoothCorners";
+    let smoothing =
+        f64_param(p, "smoothing").filter(|v| v.is_finite()).ok_or_else(|| bad(CMD, "missing `smoothing` (0–100)"))?.clamp(0.0, 100.0) / 100.0;
+    let radius = f64_param(p, "radius").filter(|v| v.is_finite()).map(|v| v.max(0.0));
+    edit_geometry(s, p, CMD, |sh| {
+        let Some(x) = sh.xfrm else { return Err(bad(CMD, "the shape has no size of its own")) };
+        let ss = x.w.min(x.h).max(0.0);
+        let own = match &sh.geom {
+            Geom::Preset { name, adj } if name == "roundRect" => Some(ss * adj.first().copied().unwrap_or(16667.0).clamp(0.0, 50000.0) / 100000.0),
+            Geom::Preset { name, .. } if name == "rect" => Some(ss * 16667.0 / 100000.0),
+            _ => None,
+        };
+        // A custom outline qualifies only when it is a squircle this command drew with `radius`
+        // (re-smoothing as the slider moves), never an arbitrary freeform.
+        let custom = match (&sh.geom, radius) {
+            (Geom::Custom { paths }, Some(r)) => match paths.as_slice() {
+                [only] => (0..=100).any(|k| deckcraft_geom::squircle::path_d(only.w, only.h, r, f64::from(k) / 100.0) == only.d),
+                _ => false,
+            },
+            _ => false,
+        };
+        let r = match (radius, own) {
+            (Some(r), _) if own.is_some() || custom => r,
+            (None, Some(r)) => r,
+            _ => return Err(bad(CMD, "only rectangles, rounded rectangles and shapes already smoothed with this `radius` can be smoothed")),
+        };
+        sh.geom = Geom::Custom {
+            paths: vec![deckcraft_model::CustomPath {
+                w: x.w,
+                h: x.h,
+                d: deckcraft_geom::squircle::path_d(x.w, x.h, r, smoothing),
+                ..Default::default()
+            }],
+        };
+        Ok(())
+    })
+}
+
 fn change(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_param(p, "preset").ok_or_else(|| bad("shape.change", "missing `preset`"))?;
     let info = deckcraft_geom::preset::info(name).ok_or_else(|| bad("shape.change", format!("unknown preset `{name}`")))?;
@@ -472,14 +538,15 @@ fn fill(s: &mut Session, p: &Value) -> Result<Value> {
     } else if p.get("picture").is_some() {
         let (name, bytes) = super::insert::media_bytes(&with_param(p, "data", p.get("picture").cloned().unwrap_or_default()), "shape.fill")?;
         let ct = super::insert::content_type(&name, &bytes);
-        let media = s.edit(|doc, _| Ok(doc.add_media(&name, ct, bytes)))?;
+        let media = s.edit(|doc, _| doc.add_media(&name, ct, bytes).ok_or_else(|| bad("shape.fill", NO_ID_SPACE)))?;
         Some(Some(Fill::Picture(PictureFill { media, ..Default::default() })))
     } else {
         None
     };
     let transparency = f64_param(p, "transparency");
-    if new_fill.is_none() && transparency.is_none() {
-        return Err(bad("shape.fill", "give `color`, `none`, `gradient`, `pattern`, `picture`, `transparency` or `reset`"));
+    let pic_props = p.get("pictureProps").filter(|v| v.is_object());
+    if new_fill.is_none() && transparency.is_none() && pic_props.is_none() {
+        return Err(bad("shape.fill", "give `color`, `none`, `gradient`, `pattern`, `picture`, `pictureProps`, `transparency` or `reset`"));
     }
     // Transparency on an inherited (style) fill needs the effective colour.
     let st = s.doc()?;
@@ -507,6 +574,14 @@ fn fill(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(f) = &new_fill {
             sh.fill.clone_from(f);
         }
+        if let (Some(pp), Some(Fill::Picture(pf))) = (pic_props, sh.fill.as_mut()) {
+            picture_props(pf, pp);
+        }
+        if let (Some(t), Some(Fill::Picture(pf))) = (transparency, sh.fill.as_mut()) {
+            let a = 1.0 - t.clamp(0.0, 1.0);
+            pf.alpha = (a < 1.0).then_some(a);
+            return Ok(());
+        }
         if let Some(t) = transparency {
             let base = sh.fill.clone().or_else(|| ctx_fill.iter().find(|(i, _)| *i == sh.id).and_then(|(_, f)| f.clone()));
             if let Some(Fill::Solid { mut color }) = base {
@@ -519,6 +594,54 @@ fn fill(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Ok(())
     })
+}
+
+/// Applies Format Shape ▸ Picture or texture fill options to a picture fill.
+fn picture_props(pf: &mut PictureFill, pp: &Value) {
+    let f = |k: &str| pp.get(k).and_then(Value::as_f64).filter(|v| v.is_finite());
+    if let Some(up) = pp.get("rotateWithShape").and_then(Value::as_bool) {
+        pf.upright = !up;
+    }
+    match pp.get("tile").and_then(Value::as_bool) {
+        Some(true) if !matches!(pf.mode, PictureMode::Tile { .. }) => {
+            pf.mode = PictureMode::Tile { tx: 0.0, ty: 0.0, sx: 1.0, sy: 1.0, flip: "none".into(), align: "tl".into() };
+        }
+        Some(false) if !matches!(pf.mode, PictureMode::Stretch { .. }) => pf.mode = PictureMode::default(),
+        _ => {}
+    }
+    match &mut pf.mode {
+        PictureMode::Tile { tx, ty, sx, sy, flip, align } => {
+            if let Some(v) = f("offsetX") {
+                *tx = v.clamp(-4000.0, 4000.0);
+            }
+            if let Some(v) = f("offsetY") {
+                *ty = v.clamp(-4000.0, 4000.0);
+            }
+            if let Some(v) = f("scaleX") {
+                *sx = v.clamp(0.01, 10.0);
+            }
+            if let Some(v) = f("scaleY") {
+                *sy = v.clamp(0.01, 10.0);
+            }
+            if let Some(m) = pp.get("mirror").and_then(Value::as_str).filter(|m| matches!(*m, "none" | "x" | "y" | "xy")) {
+                *flip = m.to_string();
+            }
+            if let Some(a) =
+                pp.get("align").and_then(Value::as_str).filter(|a| matches!(*a, "tl" | "t" | "tr" | "l" | "ctr" | "r" | "bl" | "b" | "br"))
+            {
+                *align = a.to_string();
+            }
+        }
+        PictureMode::Stretch { fill_rect } => {
+            if let Some(arr) = pp.get("stretch").and_then(Value::as_array) {
+                for (slot, v) in fill_rect.iter_mut().zip(arr) {
+                    if let Some(v) = v.as_f64().filter(|v| v.is_finite()) {
+                        *slot = v.clamp(-10.0, 0.99);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn line_end(v: &str) -> Option<LineEnd> {
@@ -665,6 +788,7 @@ fn effects(s: &mut Session, p: &Value) -> Result<Value> {
         "full" => Some(Reflection { blur: 0.5, start_alpha: 0.5, end_alpha: 0.0, end_pos: 0.9, dist: 4.0 }),
         _ => Some(Reflection { blur: 0.5, start_alpha: 0.5, end_alpha: 0.0, end_pos: 0.35, dist: 0.0 }),
     });
+    let three_d = p.get("threeD").filter(|v| v.is_object());
     let bevel = str_param(p, "bevel").map(|b| if b == "none" { None } else { Some(b.to_string()) });
     let shadow_props = p.get("shadowProps").filter(|v| v.is_object()).cloned();
     let glow_props = p.get("glowProps").filter(|v| v.is_object()).cloned();
@@ -700,8 +824,18 @@ fn effects(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(r) = &refl {
             e.reflection.clone_from(r);
         }
-        if let Some(b) = &bevel {
-            e.bevel.clone_from(b);
+        if bevel.is_some() || three_d.is_some() {
+            let mut s3 = e.raw3d.as_deref().map(super::three_d::Shape3d::parse).unwrap_or_default();
+            if let Some(b) = &bevel {
+                s3.apply(&json!({"bevelTop": b.as_deref().unwrap_or("none")}));
+            }
+            if let Some(t) = three_d {
+                if t.get("reset").and_then(Value::as_bool) == Some(true) {
+                    s3 = super::three_d::Shape3d::default();
+                }
+                s3.apply(t);
+            }
+            super::three_d::store(e, &s3);
         }
         if let Some(v) = &shadow_props {
             let slot = if e.inner_shadow.is_some() { &mut e.inner_shadow } else { &mut e.outer_shadow };
@@ -962,7 +1096,7 @@ fn picture_reset(s: &mut Session, p: &Value) -> Result<Value> {
 fn picture_change(s: &mut Session, p: &Value) -> Result<Value> {
     let (name, bytes) = super::insert::media_bytes(p, "picture.change")?;
     let ct = super::insert::content_type(&name, &bytes);
-    let media = s.edit(|doc, _| Ok(doc.add_media(&name, ct, bytes)))?;
+    let media = s.edit(|doc, _| doc.add_media(&name, ct, bytes).ok_or_else(|| bad("picture.change", NO_ID_SPACE)))?;
     edit_shapes(s, p, "picture.change", |sh| {
         if let deckcraft_model::ShapeKind::Picture { fill } = &mut sh.kind {
             fill.media = media;
@@ -1320,7 +1454,7 @@ fn ink_to_shape(s: &mut Session, _p: &Value) -> Result<Value> {
             list.remove(pos);
         }
         for (preset, xfrm, color, width) in made {
-            let id = ShapeId(doc.alloc_id());
+            let id = ShapeId(doc.alloc_id().ok_or_else(|| bad("draw.inkToShape", NO_ID_SPACE))?);
             let name = format!(
                 "{} {}",
                 match preset {

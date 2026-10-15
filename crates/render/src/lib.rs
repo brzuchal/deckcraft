@@ -222,6 +222,9 @@ pub struct RenderOpts<'a> {
     pub skip: &'a [ShapeId],
     /// Hide the text of this shape (the UI draws it while editing).
     pub skip_text: Option<ShapeId>,
+    /// Text being edited: replace its prompt with gray markers on empty list paragraphs.
+    /// Ignored outside editor rendering.
+    pub editing_text: Option<ShapeId>,
     /// Animated GIF pictures and how far into their play they are (seconds); others show frame 1.
     pub gif_times: &'a [(ShapeId, f64)],
     /// Worker threads (0 = this thread; required when effects use filters).
@@ -246,6 +249,7 @@ impl Default for RenderOpts<'_> {
             state: None,
             skip: &[],
             skip_text: None,
+            editing_text: None,
             gif_times: &[],
             threads: 0,
             offset: (0.0, 0.0),
@@ -309,11 +313,21 @@ pub struct Renderer {
     /// The fill of the group being drawn, with the transform and box it is laid out in: children
     /// filled with the group's fill (`a:grpFill`) show it, as one fill across the whole group.
     group_fill: Option<(Fill, Affine, Rect)>,
+    /// Their aligned outlines, kept from frame to frame.
+    morphs: morph_path::Cache,
 }
 
 impl Default for Renderer {
     fn default() -> Self {
-        Renderer { resources: Resources::new(), paths: Vec::new(), bg: None, drawn: None, view: Affine::IDENTITY, group_fill: None }
+        Renderer {
+            resources: Resources::new(),
+            paths: Vec::new(),
+            bg: None,
+            drawn: None,
+            view: Affine::IDENTITY,
+            group_fill: None,
+            morphs: morph_path::Cache::default(),
+        }
     }
 }
 
@@ -733,6 +747,7 @@ impl Renderer {
             }
         }
         self.paths.clear();
+        self.morphs.sweep();
         self.finish(ctx, w, h)
     }
 
@@ -910,7 +925,7 @@ impl Renderer {
             }
             ShapeKind::Table(t) => {
                 // Rows grow with their text: what the cells cover, borders included.
-                let cells = table::draw(ctx, f.pres, rctx, t, m, x.w, x.h, &f.fields);
+                let cells = table::draw(ctx, f.pres, rctx, t, m, x.w, x.h, &f.fields, f.opts.edit && f.opts.editing_text == Some(s.id));
                 self.track(m, cells.unwrap_or(Rect::new(0.0, 0.0, x.w, x.h)).inflate(2.0, 2.0));
             }
             ShapeKind::Chart(c) => {
@@ -919,24 +934,46 @@ impl Renderer {
             }
             ShapeKind::Ink { strokes } => {
                 for sk in strokes {
-                    let w = if sk.width.is_finite() { sk.width.abs() } else { 0.0 };
-                    for (px, py, _) in &sk.points {
+                    let legacy = deckcraft_model::ink_pressure_is_legacy(&sk.points);
+                    let pen = if sk.width.is_finite() { sk.width.abs() } else { 0.0 };
+                    for (px, py, pr) in &sk.points {
+                        let w = deckcraft_model::ink_sample_width(pen, *pr, legacy);
                         self.track(parent, Rect::new(*px, *py, *px, *py).inflate(w, w));
                     }
-                    let mut bp = BezPath::new();
-                    for (i, (px, py, _)) in sk.points.iter().enumerate() {
-                        if i == 0 {
-                            bp.move_to((*px, *py));
-                        } else {
-                            bp.line_to((*px, *py));
-                        }
+                    let pts: Vec<(f64, f64, f32)> = sk.points.iter().copied().filter(|p| p.0.is_finite() && p.1.is_finite()).collect();
+                    if pts.len() < 2 {
+                        continue;
                     }
                     let (base, rel) = self.line_space(parent, depth);
-                    bp.apply_affine(rel);
                     ctx.set_transform(base);
                     ctx.set_paint(color(sk.color, if sk.highlighter { 0.4 } else { 1.0 }));
-                    ctx.set_stroke(kurbo::Stroke::new(sk.width.max(0.1)).with_caps(kurbo::Cap::Round).with_join(kurbo::Join::Round));
-                    ctx.stroke_path(&bp);
+                    // Uniform-width and highlighter strokes are one path: segments drawn one by one
+                    // overlap at the joins, which darkens see-through highlighter ink in beads.
+                    if legacy || sk.highlighter {
+                        let mut bp = BezPath::new();
+                        for (i, (px, py, _)) in pts.iter().enumerate() {
+                            if i == 0 {
+                                bp.move_to((*px, *py));
+                            } else {
+                                bp.line_to((*px, *py));
+                            }
+                        }
+                        bp.apply_affine(rel);
+                        ctx.set_stroke(kurbo::Stroke::new(pen.max(0.1)).with_caps(kurbo::Cap::Round).with_join(kurbo::Join::Round));
+                        ctx.stroke_path(&bp);
+                        continue;
+                    }
+                    for pair in pts.windows(2) {
+                        let [p0, p1] = pair else { continue };
+                        let mut bp = BezPath::new();
+                        bp.move_to((p0.0, p0.1));
+                        bp.line_to((p1.0, p1.1));
+                        bp.apply_affine(rel);
+                        let a = deckcraft_model::ink_sample_width(pen, p0.2, legacy);
+                        let b = deckcraft_model::ink_sample_width(pen, p1.2, legacy);
+                        ctx.set_stroke(kurbo::Stroke::new(((a + b) * 0.5).max(0.1)).with_caps(kurbo::Cap::Round).with_join(kurbo::Join::Round));
+                        ctx.stroke_path(&bp);
+                    }
                 }
             }
             _ => self.geometry_shape(ctx, f, rctx, s, m, x.w, x.h, &st, depth),
@@ -960,7 +997,7 @@ impl Renderer {
         depth: usize,
     ) {
         let (geo, fades) = match self.paths.iter().find(|p| p.id == s.id) {
-            Some(pm) => morph_path::geometry(pm, s, w, h),
+            Some(pm) => self.morphs.geometry(pm, s, w, h),
             None => (shape_geometry(s, w, h), Vec::new()),
         };
         let fade = |i: usize| fades.get(i).copied().unwrap_or(deckcraft_geom::morph::Fade { fill: 1.0, stroke: 1.0 });
@@ -1267,8 +1304,21 @@ impl Renderer {
                 &text_geo
             };
             let tr = geo.text_rect;
-            if !body.is_empty() {
-                let l = deckcraft_text::layout(rctx, s, body, &Opts { rect: tr, fields: &f.fields, prompt_color: None, no_shrink: false });
+            let editing = f.opts.edit && f.opts.editing_text == Some(s.id);
+            if !body.is_empty() || editing {
+                // Imported placeholders can have no paragraph until the first keystroke.
+                let mut empty;
+                let body = if editing && body.paragraphs.is_empty() {
+                    empty = body.clone();
+                    empty.paragraphs.push(Default::default());
+                    &empty
+                } else {
+                    body
+                };
+                let mut l = deckcraft_text::layout(rctx, s, body, &Opts { rect: tr, fields: &f.fields, prompt_color: None, no_shrink: false });
+                if editing {
+                    preview_empty_bullets(&mut l);
+                }
                 let tm = text_transform(m, tr, l.rotation);
                 for b in l.lines.iter().filter_map(line_bounds) {
                     // Glyphs reach a little past their carets and line box (italics, swashes).
@@ -1388,7 +1438,10 @@ impl Renderer {
             ctx.set_paint(color(c.with_alpha(255), 1.0));
             ctx.set_stroke(kurbo::Stroke::new(g.radius.max(0.0) * 0.95).with_join(kurbo::Join::Round));
             ctx.stroke_path(&silhouette);
-            ctx.fill_path(&silhouette);
+            // A shape without a fill (an outline, a frame) glows along its line only (#225).
+            if fill_alpha.is_some() || content.is_some() {
+                ctx.fill_path(&silhouette);
+            }
             ctx.pop_layer();
         }
         if let Some(rf) = &e.reflection {
@@ -1996,6 +2049,15 @@ pub(crate) fn glyph(face: &deckcraft_fonts::FontFace, gid: u32) -> Arc<BezPath> 
 pub fn draw_text(ctx: &mut RenderContext, rctx: &Ctx, s: &Shape, body: &TextBody, tr: Rect, m: Affine, fields: &dyn Fields, prompt: Option<Rgba>) {
     let l = deckcraft_text::layout(rctx, s, body, &Opts { rect: tr, fields, prompt_color: prompt, no_shrink: false });
     draw_layout(ctx, &l, tr, m);
+}
+
+/// Add transient list markers to an editor layout, using the document's own bullet glyphs.
+fn preview_empty_bullets(l: &mut deckcraft_text::TextLayout) {
+    for mut run in l.empty_bullets.drain(..) {
+        run.color = Rgba::rgb(0xB3, 0xB3, 0xB3);
+        run.alpha = 1.0;
+        l.runs.push(run);
+    }
 }
 
 /// Where text laid out in text rect `tr` is drawn, for a shape drawn with `m` (shape-local →
