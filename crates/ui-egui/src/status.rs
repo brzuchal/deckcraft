@@ -29,13 +29,13 @@ pub fn status_bar(app: &mut SlideApp, ui: &mut Ui) {
         let right_x = rect.max.x - 560.0;
         // The selection's proofing language; a click opens Review › Language.
         let (lang, no_proof) = crate::dialogs::selected_language(app);
-        let name = crate::squiggles::lang_name(&lang) + if no_proof { " (not checked)" } else { "" };
+        let name = crate::squiggles::display_lang_name(ui.ctx(), &lang) + if no_proof { " (not checked)" } else { "" };
         let lx = (rect.min.x + 120.0).max(sr.max.x + 16.0);
         let lclip = Rect::from_min_max(pos2(lx - 3.0, rect.min.y), pos2(right_x.max(lx - 3.0), rect.max.y));
         let lr = p.with_clip_rect(lclip).text(pos2(lx, rect.center().y), Align2::LEFT_CENTER, &name, theme::font(12.0), t.text_dim);
         let hit = lr.expand(3.0).intersect(lclip);
         if hit.is_positive() {
-            let resp = ui.interact(hit, ui.id().with("status_lang"), Sense::click()).on_hover_text("Language");
+            let resp = ui.interact(hit, ui.scope_id().with("status_lang"), Sense::click()).on_hover_text("Language");
             resp.widget_info(|| named_with_value("Language", &name));
             if resp.clicked() {
                 app.dialog = Some(crate::dialogs::Dialog::new("language"));
@@ -98,16 +98,17 @@ pub fn status_bar(app: &mut SlideApp, ui: &mut Ui) {
     });
 }
 
+/// Draw a small status icon with a tooltip and return its interaction response.
 fn small_icon(ui: &mut Ui, icon: Icon, tip: &str, on: bool) -> egui::Response {
     let resp = icon_button(ui, icon, on);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip));
     resp.on_hover_text(tip)
 }
 
 /// A view button: screen readers hear its name and whether its view is the one shown.
 fn view_icon(ui: &mut Ui, icon: Icon, tip: &str, on: bool) -> egui::Response {
     let resp = icon_button(ui, icon, on);
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, tip));
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, tip));
     resp.on_hover_text(tip)
 }
 
@@ -123,27 +124,31 @@ fn icon_button(ui: &mut Ui, icon: Icon, on: bool) -> egui::Response {
 
 /// A clickable status-bar text: screen readers hear `label` as its name and `text` as its value.
 fn named_with_value(label: &str, text: &str) -> egui::WidgetInfo {
-    egui::WidgetInfo { current_text_value: Some(text.to_string()), ..egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label) }
+    egui::WidgetInfo { current_text_value: Some(text.to_string()), ..egui::WidgetInfo::labeled(egui::Role::Button, true, label) }
 }
 
 /// Painted status-bar text: screen readers read `text` from a label over `rect`.
 fn shown_text(ui: &Ui, rect: Rect, id: &str, text: &str) {
     if rect.is_positive() {
-        let resp = ui.interact(rect, ui.id().with(id), Sense::hover());
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+        let resp = ui.interact(rect, ui.scope_id().with(id), Sense::hover());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
     }
 }
 
+/// Draw a labelled status icon, painting the text directly and exposing the toggle state as its
+/// accessible selected state.
 fn labeled(ui: &mut Ui, icon: Icon, label: &str, on: bool) -> egui::Response {
     let t = Tokens::get(ui.ctx());
     let w = 22.0 + ui.fonts_mut(|f| f.layout_no_wrap(label.into(), theme::font(12.0), t.text).size().x) + 8.0;
     let (r, resp) = ui.allocate_exact_size(vec2(w, 20.0), Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, label));
     if on || resp.hovered() {
         ui.painter().rect_filled(r, CornerRadius::same(4), if on { t.selected } else { t.hover });
     }
     icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 11.0, r.center().y), vec2(15.0, 15.0)), icon, t.text_dim, false);
     ui.painter().text(pos2(r.min.x + 22.0, r.center().y), Align2::LEFT_CENTER, label, theme::font(12.0), t.text_dim);
+    // The visible label is painted directly, so name the interactive control explicitly and
+    // expose the toggle state as selected: a screen reader hears "Notes, pressed" not "Notes".
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), on, label));
     resp
 }
 
@@ -162,7 +167,7 @@ pub fn notes_pane(app: &mut SlideApp, ui: &mut Ui) {
     let (idx, uid) = (st.selection.slide, st.uid);
     // Save an edited draft once the field has lost focus or another slide is shown (before
     // anything reloads it), to the slide it was written on.
-    let id = egui::Id::new("notes_edit");
+    let id = egui::Id::unique("notes_edit");
     let focused = ui.ctx().memory(|m| m.has_focus(id));
     if app.notes_buf.2.edited && (!focused || app.notes_buf.0 != uid || app.notes_buf.1 != idx) {
         app.notes_buf.2.edited = false;
@@ -288,13 +293,15 @@ pub fn notes_pane(app: &mut SlideApp, ui: &mut Ui) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use deckcraft_engine::Session;
     use egui::accesskit::{Role, Toggled};
     use egui::{Event, Modifiers, PointerButton};
-    use egui_kittest::Harness;
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT, Queryable},
+    };
     use serde_json::json;
 
     use crate::{Services, SlideApp, ViewMode};
@@ -317,6 +324,12 @@ mod tests {
         );
         h.run_steps(3);
         assert!(!h.state().ui.notes);
+        {
+            let mut notes = h.query_all_by_role_and_label(Role::Button, "Notes");
+            let button = notes.next().expect("the Notes button is there");
+            assert!(notes.next().is_none(), "exactly one Notes button, not a duplicated label target");
+            assert_eq!(button.accesskit_node().toggled(), Some(Toggled::False), "the Notes button reports its off state to screen readers");
+        }
         // The controls on the right start 560 points from the bar's right edge, which is 8 points
         // inside the window (x 132); the Notes button is the leftmost of them. Its position depends
         // on the interface font's widths, so the clicks use the position it was laid out at.
@@ -337,6 +350,11 @@ mod tests {
         assert!(!h.state().ui.notes, "the click in the gap did not reach the Notes button");
         click(&mut h, notes.center());
         assert!(h.state().ui.notes, "the click reached the Notes button");
+        assert_eq!(
+            h.get_by_role_and_label(egui::Role::Button, "Notes").accesskit_node().toggled(),
+            Some(Toggled::True),
+            "the open notes pane is exposed as a pressed Notes button"
+        );
         assert!(h.state().dialog.is_none(), "the Language dialog stayed closed");
     }
 
@@ -344,8 +362,6 @@ mod tests {
     /// hear which view button is on, and read the slide counter and the status message.
     #[test]
     fn status_bar_controls_have_names() {
-        use egui_kittest::kittest::NodeT;
-
         let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(
             |ui, app: &mut SlideApp| {
                 app.logic(ui.ctx());
@@ -354,8 +370,12 @@ mod tests {
             SlideApp::new(Session::with_new(), Services::default()),
         );
         h.run_steps(3);
+        let status_y = h.get_by_role_and_label(Role::Button, "Fit slide to current window").rect().center().y;
         for name in ["Fit slide to current window", "Zoom In", "Zoom Out", "Slide Show", "Reading View"] {
-            h.get_by_role_and_label(Role::Button, name);
+            // The ribbon also has a "Slide Show" control. Require exactly one named button
+            // in the Fit button's laid-out status row, allowing the app's UI zoom.
+            let buttons = h.get_all_by_role_and_label(Role::Button, name).filter(|n| n.rect().y_range().contains(status_y)).count();
+            assert_eq!(buttons, 1, "one {name} button in the status bar");
         }
         let pct = format!("{}%", (h.state().canvas_scale * 100.0).round());
         assert_eq!(h.get_by_role_and_label(Role::Button, "Zoom level").value().as_deref(), Some(pct.as_str()));
