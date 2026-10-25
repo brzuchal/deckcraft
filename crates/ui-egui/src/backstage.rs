@@ -175,6 +175,8 @@ pub struct Backstage {
     pub file_type: &'static str,
     pub handouts_per_page: u8,
     pub pdf_hidden: bool,
+    /// Export › Change File Type › PNG: leave the slide background out (#784).
+    pub png_transparent: bool,
 }
 
 impl Backstage {
@@ -197,6 +199,7 @@ impl Backstage {
             file_type: "pptx",
             handouts_per_page: 3,
             pdf_hidden: false,
+            png_transparent: false,
         }
     }
 
@@ -211,11 +214,12 @@ impl Backstage {
 }
 
 /// Save As and Change File Type: (id for [`SlideApp::export_as`], label, detail).
-pub const SAVE_TYPES: [(&str, &str, &str); 6] = [
+pub const SAVE_TYPES: [(&str, &str, &str); 7] = [
     ("pptx", "PowerPoint Presentation (*.pptx)", "Opens in PowerPoint and other presentation apps"),
     ("deckcraft", "DeckCraft Presentation (*.deckcraft)", "DeckCraft's own format: everything is kept"),
     ("pdf", "PDF (*.pdf)", "A fixed copy that keeps its layout on any device"),
     ("outline", "Outline (*.txt)", "The slide titles and bullet text as plain text"),
+    ("rtf", "Outline/RTF (*.rtf)", "The slide titles and bullet text for word processors"),
     ("png", "PNG Picture (*.png)", "The current slide as a picture"),
     ("jpeg", "JPEG Picture (*.jpg)", "The current slide as a compressed picture"),
 ];
@@ -385,6 +389,7 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
     });
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(page_bg)).show(ui, |ui| {
         // Fields, boxes and buttons sit on the page's own colour: outline them, as PowerPoint does.
+        ui.visuals_mut().text_edit_bg_color = Some(t.field_bg);
         let w = &mut ui.visuals_mut().widgets;
         w.inactive.bg_fill = t.field_bg;
         w.inactive.weak_bg_fill = t.field_bg;
@@ -569,8 +574,8 @@ fn template_tiles(app: &mut SlideApp, ui: &mut Ui, query: &str, limit: usize) ->
 /// File name and folder of a recent path, split as text (nothing on disk is read).
 pub fn split_path(path: &str) -> (String, String) {
     let p = std::path::Path::new(path);
-    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or(path).to_string();
-    let folder = p.parent().and_then(|f| f.to_str()).unwrap_or("").to_string();
+    let name = p.file_name().and_then(std::ffi::OsStr::to_str).unwrap_or(path).to_string();
+    let folder = p.parent().and_then(std::path::Path::to_str).unwrap_or("").to_string();
     (name, folder)
 }
 
@@ -824,7 +829,7 @@ fn info(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage) {
                 app.set_status("Copied the path");
             }
             #[cfg(not(target_arch = "wasm32"))]
-            if let Some(dir) = std::path::Path::new(p).parent().and_then(|d| d.to_str())
+            if let Some(dir) = std::path::Path::new(p).parent().and_then(std::path::Path::to_str)
                 && ui.button("Open file location").clicked()
             {
                 app.open_url(&format!("file:///{}", dir.replace('\\', "/").trim_start_matches('/')));
@@ -1310,8 +1315,15 @@ fn export(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage) {
                         }
                     }
                     ui.add_space(12.0);
+                    let png = bs.file_type == "png";
+                    if png {
+                        ui.checkbox(&mut bs.png_transparent, "Transparent background")
+                            .on_hover_text("Leave the slide background out: only what is on the slide is drawn");
+                        ui.add_space(8.0);
+                    }
                     if square_button(ui, Icon::SaveAs, "Save As", true).clicked() {
-                        app.export_as(bs.file_type, json!({}));
+                        let extra = if png && bs.png_transparent { json!({"transparentBackground": true}) } else { json!({}) };
+                        app.export_as(bs.file_type, extra);
                     }
                 }
             }
